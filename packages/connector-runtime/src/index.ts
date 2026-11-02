@@ -1,1 +1,8 @@
-// placeholder
+export { parsePath, evalPath, pathGet, pathGetAll } from './path.js';
+export type { PathSegment, JsonPathResult } from './path.js';
+export { evalExpr } from './expr.js';
+export type { ExprContext, ExprResult } from './expr.js';
+export { renderTemplate, renderObject } from './template.js';
+export type { TemplateContext } from './template.js';
+export { applyTransform, isKnownTransform } from './transforms.js';
+export type { TransformFn, TransformContext } from './transforms.js';
