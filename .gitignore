@@ -56,3 +56,6 @@ deploy/docker-compose.override.yml
 # docker secrets — master_key must never be committed
 deploy/secrets/
 !deploy/secrets/*.example
+
+# TS build info
+*.tsbuildinfo
