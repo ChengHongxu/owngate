@@ -121,7 +121,15 @@ export async function buildBrowserServer() {
 
     try {
       const entry = await sessionManager.entry(connection_id)
-      const result = await execCapability(entry.context, capability, params, deadline_ms)
+      // One execution at a time per connection (design §13.1): a second request
+      // waits for the first instead of sharing the same browser context.
+      const release = await entry.lock.acquire()
+      let result: ExecResult
+      try {
+        result = await execCapability(entry.context, capability, params, deadline_ms)
+      } finally {
+        release()
+      }
       checkCache.set(exec_id, {
         result,
         expiresAt: Date.now() + CHECK_CACHE_TTL_MS,
