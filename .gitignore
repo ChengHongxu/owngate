@@ -1,0 +1,54 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# build outputs
+dist/
+build/
+.next/
+out/
+
+# env & secrets — never commit these
+.env
+.env.local
+.env.*.local
+deploy/.env
+
+# database & vault
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+vault/
+
+# logs
+*.log
+logs/
+
+# test coverage
+coverage/
+.nyc_output/
+
+# IDE
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pnpm
+.pnpm-store/
+
+# turbo cache
+.turbo/
+
+# playwright browsers (pulled at runtime inside Docker)
+/playwright/.local-browsers/
+
+# docker local overrides
+deploy/docker-compose.override.yml

@@ -1,0 +1,24 @@
+{
+  "name": "@webridge/browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "node --watch dist/main.js",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@webridge/core": "workspace:*",
+    "@webridge/browser-runtime": "workspace:*",
+    "fastify": "^5.4.0",
+    "pino": "^9.7.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

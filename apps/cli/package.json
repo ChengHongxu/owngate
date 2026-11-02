@@ -1,0 +1,27 @@
+{
+  "name": "@webridge/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "webridge": "./dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@webridge/core": "workspace:*",
+    "commander": "^14.0.0",
+    "cli-table3": "^0.6.5",
+    "picocolors": "^1.1.1",
+    "undici": "^7.10.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}
