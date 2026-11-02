@@ -40,8 +40,13 @@ function ipToLong(ip) {
 
 function cidrToRange(cidr, prefix) {
   const base = ipToLong(cidr)
+  // Use unsigned arithmetic throughout: a signed mask (0xffffffff << 16) is
+  // negative and would make the masked base negative too, never matching the
+  // unsigned IP value returned by ipToLong.
   const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
-  return [base & mask, (base & mask) | (~mask >>> 0)]
+  const lo = (base & mask) >>> 0
+  const hi = (lo | (~mask >>> 0)) >>> 0
+  return [lo, hi]
 }
 
 function isBlockedIPv4(ip) {

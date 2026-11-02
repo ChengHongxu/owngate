@@ -23,10 +23,11 @@ export function makeHmacPlugin(secret: string) {
 
     // Capture raw body string before parsing so HMAC can be verified
     app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
-      req.rawBody = body
+      const bodyStr = typeof body === 'string' ? body : (body as Buffer).toString('utf8')
+      req.rawBody = bodyStr
       let parsed: unknown
       try {
-        parsed = JSON.parse(body)
+        parsed = JSON.parse(bodyStr)
       } catch {
         done(new Error('Invalid JSON body'), undefined)
         return
@@ -35,8 +36,9 @@ export function makeHmacPlugin(secret: string) {
     })
 
     app.addHook('preHandler', async (request, reply) => {
-      // Health check has no body to sign — skip
-      if (request.method === 'GET') return
+      // Health check has no body to sign — the only unprotected route
+      const pathname = request.url.split('?')[0]
+      if (request.method === 'GET' && pathname === '/v1/health') return
 
       const sig = request.headers['x-wr-sig']
       const ts = request.headers['x-wr-ts']

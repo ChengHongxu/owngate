@@ -1,7 +1,6 @@
 // Capability executor — M1 stub. Real implementations (feed.list etc.) come in M2.
 
 import type { BrowserContext } from 'playwright'
-
 export interface ExecResult {
   status: 'ok' | 'error'
   data?: unknown

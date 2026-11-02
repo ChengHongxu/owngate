@@ -53,12 +53,18 @@ services:
     restart: unless-stopped
 
   egress:
-    # M0 占位：M1 实现真正的按连接出网代理
-    image: alpine:3.20
-    command: ["sleep", "infinity"]
+    build:
+      context: ..
+      dockerfile: services/egress-proxy/Dockerfile
+    image: webridge/egress-proxy
     networks:
-      - internal
-      - wan_egress
+      - internal                         # 接收 browser 的代理请求
+      - wan_egress                       # 唯一出网点
+    environment:
+      EGRESS_PROXY_PORT: "3128"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    read_only: true
+    user: "1000:1000"
     restart: unless-stopped
 
 secrets:
