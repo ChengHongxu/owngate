@@ -45,6 +45,11 @@ export async function requireAdminSession(
   reply: FastifyReply,
   auth: AuthService,
 ): Promise<AdminSession | null> {
+  // Development mode: bypass auth if DEV_SKIP_AUTH=1
+  if (process.env['DEV_SKIP_AUTH'] === '1') {
+    return { sessionId: 'dev', userId: 'dev-user' };
+  }
+
   const sessionId = request.cookies[SESSION_COOKIE];
   if (!sessionId) {
     await reply.status(401).send({ error: 'Not authenticated', code: 'NO_SESSION' });
