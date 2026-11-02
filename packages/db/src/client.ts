@@ -210,6 +210,9 @@ export class DbClient {
   deleteLoginSession(id: string) {
     return this.call<LoginSessionRow | undefined>('deleteLoginSession', { id });
   }
+  deleteLoginSessionsForUser(user_id: string) {
+    return this.call<LoginSessionRow[]>('deleteLoginSessionsForUser', { user_id });
+  }
   deleteExpiredLoginSessions(now: string) {
     return this.call<LoginSessionRow[]>('deleteExpiredLoginSessions', { now });
   }

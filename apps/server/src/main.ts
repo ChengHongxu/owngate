@@ -19,7 +19,10 @@ import type { Capability, Connection, Client, Grant } from '@webridge/core';
 import { registerMcpRoutes } from './routes/mcp.js';
 import { registerRestRoutes } from './routes/rest.js';
 import { registerAdminRoutes } from './routes/admin.js';
+import { registerAuthRoutes } from './routes/auth.js';
 import { registerScreenRoutes } from './routes/screen.js';
+import { createAuthService } from './auth/service.js';
+import { SESSION_COOKIE } from './auth/guard.js';
 import { startLogin, stopLogin } from './dispatchers/browser.js';
 import { ConnectorRegistry } from './registry.js';
 import { UnifiedDispatcher } from './dispatchers/index.js';
@@ -146,6 +149,19 @@ export async function buildServer() {
   // Health check
   app.get('/health', async () => ({ ok: true, time: new Date().toISOString() }));
 
+  // ── Admin authentication (design §7.2, §8.2, D8) ──────────────────────────
+  // Must be registered before any module that reads request.cookies:
+  // registerAuthRoutes installs @fastify/cookie (fastify-plugin, so it leaks
+  // out to routes registered afterwards).
+  const authService = createAuthService({
+    db,
+    vault,
+    rpID: process.env['WEBRIDGE_RP_ID'] ?? 'localhost',
+    rpName: 'webridge',
+    origin: process.env['WEBRIDGE_ORIGIN'] ?? 'http://localhost:3000',
+  });
+  await registerAuthRoutes(app, { auth: authService, db });
+
   // Register route modules
   await registerRestRoutes(app, { services, invokeOpts, db, vault });
   await registerMcpRoutes(app, { services, invokeOpts });
@@ -159,11 +175,19 @@ export async function buildServer() {
   });
 
   // Remote screen forwarding (design §4.4.5: screen only through the server).
-  // M1 has no admin auth yet, so the gates are permissive stand-ins; the auth
-  // module replaces them. Returning a user id here keeps the routes reachable.
+  // Gates are the real admin session + step-up, not stand-ins.
   await registerScreenRoutes(app, {
-    getAdminUserId: async () => 'admin-local',
-    hasStepUp: async () => true,
+    getAdminUserId: async (request) => {
+      const sessionId = request.cookies[SESSION_COOKIE];
+      if (sessionId === undefined) return null;
+      const session = await authService.getSession(sessionId);
+      return session?.userId ?? null;
+    },
+    hasStepUp: async (request) => {
+      const sessionId = request.cookies[SESSION_COOKIE];
+      if (sessionId === undefined) return false;
+      return authService.hasStepUp(sessionId);
+    },
     startLogin,
     stopLogin,
     audit: (entry) => auditStore.append({ client_id: entry.client_id, action: entry.action, target: entry.target, detail: entry.detail }),

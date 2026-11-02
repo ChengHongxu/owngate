@@ -311,6 +311,14 @@ const handlers: Record<string, Handler> = {
       .get();
   },
 
+  async deleteLoginSessionsForUser(args) {
+    const { user_id } = args as { user_id: string };
+    return orm.delete(schema.login_sessions)
+      .where(eq(schema.login_sessions.user_id, user_id))
+      .returning()
+      .all();
+  },
+
   async deleteExpiredLoginSessions(args) {
     // expires_at is always written by the auth service in ISO-8601 (UTC) form,
     // so a lexicographic comparison against another ISO string is chronological.

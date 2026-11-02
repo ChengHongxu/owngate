@@ -25,7 +25,7 @@ interface CheckCacheEntry {
 export async function buildBrowserServer() {
   // Read the secret at build time, not module load: tests set it in beforeAll.
   const rpcSecret = process.env['BROWSER_RPC_SECRET'] ?? ''
-  const sessionManager = new SessionManager(PROFILES_DIR)
+  const sessionManager = new SessionManager(PROFILES_DIR, process.env['BROWSER_EGRESS_PROXY'])
   const checkCache = new Map<string, CheckCacheEntry>()
 
   const app = Fastify({

@@ -31,7 +31,7 @@ export function base32Encode(buf: Uint8Array): string {
  */
 export function base32Decode(input: string): Buffer {
   const clean = input.toUpperCase().replace(/[\s=-]/g, '');
-  if (clean.length === 0) throw new Error('base32: empty input');
+  if (clean.length === 0) return Buffer.alloc(0);
 
   let bits = 0;
   let value = 0;

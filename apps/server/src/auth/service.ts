@@ -68,7 +68,8 @@ export class AuthService {
   private readonly vault: Vault;
   private readonly rpID: string;
   private readonly rpName: string;
-  private readonly origin: string;
+  /** Public so route wiring can derive cookie flags (secure only over https). */
+  readonly origin: string;
 
   // Step-up grants live in memory (acceptable for a single-admin deployment:
   // a server restart revokes all step-up grants, sessions survive in SQLite).
@@ -144,8 +145,9 @@ export class AuthService {
   async resetPassword(userId: string, newPassword: string): Promise<void> {
     const passwordHash = await argon2.hash(newPassword);
     await this.db.updateAdminPassword({ id: userId, password_hash: passwordHash });
-    // Any stolen session becomes useless after a reset.
-    await this.db.deleteExpiredLoginSessions(nowIso()).catch(() => undefined);
+    // Revoke every live session: a reset is exactly the moment a stolen cookie
+    // must stop working. The CLI caller re-authenticates afterwards.
+    await this.db.deleteLoginSessionsForUser(userId);
     await this.audit('auth.password.reset', userId, { via: 'cli' });
   }
 
@@ -328,14 +330,16 @@ export class AuthService {
     const expectedChallenge = this.takeChallenge(this.registrationChallenges, userId);
     if (!expectedChallenge) return { verified: false };
 
+    // A malformed payload makes @simplewebauthn throw; treat that as "not verified"
+    // so a bad request never surfaces as a 500.
     const result = await verifyRegistrationResponse({
       response,
       expectedChallenge,
       expectedOrigin: this.origin,
       expectedRPID: this.rpID,
       requireUserVerification: true,
-    });
-    if (!result.verified) {
+    }).catch(() => null);
+    if (!result || !result.verified) {
       await this.audit('auth.passkey.register.failure', userId, {});
       return { verified: false };
     }
@@ -440,6 +444,10 @@ export class AuthService {
   async markStepUp(sessionId: string): Promise<void> {
     this.cleanupStepUps();
     this.stepUps.set(sessionId, Date.now() + STEP_UP_TTL_MS);
+    const session = await this.getSession(sessionId);
+    await this.audit('auth.stepup', session?.userId ?? 'unknown', {
+      session_prefix: sessionId.slice(0, 8),
+    });
   }
 
   async hasStepUp(sessionId: string): Promise<boolean> {

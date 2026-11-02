@@ -1,8 +1,8 @@
 // Session manager: wraps BrowserPool + XvfbManager, manages screencast stream tokens.
 
 import { randomBytes } from 'node:crypto'
-import { BrowserPool, XvfbManager } from '@webridge/browser-runtime'
-import type { BrowserEntry } from '@webridge/browser-runtime'
+import { BrowserPool, XvfbManager, ProxyCredentialStore } from '@webridge/browser-runtime'
+import type { BrowserEntry, BrowserPoolOptions } from '@webridge/browser-runtime'
 
 const STREAM_TOKEN_TTL_MS = 5 * 60 * 1000
 
@@ -16,6 +16,14 @@ interface LoginState {
   deadlineMs?: number
 }
 
+/**
+ * Browser worker session manager.
+ *
+ * `egressProxyServer` (env BROWSER_EGRESS_PROXY, e.g. http://egress:3128) makes
+ * every browser go through the egress proxy — design §4.4.1 requires it: the
+ * container has no direct route out. When unset, browsers talk to the network
+ * directly, which is only acceptable for local development.
+ */
 export class SessionManager {
   private readonly xvfb = new XvfbManager()
   /** One pool per profile base directory — BrowserPool appends `/<connectionId>`. */
@@ -24,8 +32,13 @@ export class SessionManager {
   private readonly entries = new Map<string, BrowserEntry>()
   private readonly streamTokens = new Map<string, StreamTokenEntry>()
   private readonly loginState = new Map<string, LoginState>()
+  /** Per-connection proxy credentials, shared by every pool in this process. */
+  private readonly proxyCredentials = new ProxyCredentialStore()
 
-  constructor(private readonly defaultProfilesDir: string) {}
+  constructor(
+    private readonly defaultProfilesDir: string,
+    private readonly egressProxyServer?: string,
+  ) {}
 
   async openSession(connectionId: string, profilePath: string): Promise<{ session_id: string }> {
     const entry = await this.poolFor(profilePath || this.defaultProfilesDir).acquire(connectionId)
@@ -122,7 +135,16 @@ export class SessionManager {
   private poolFor(profilesDir: string): BrowserPool {
     const existing = this.pools.get(profilesDir)
     if (existing) return existing
-    const pool = new BrowserPool(this.xvfb, profilesDir)
+    const options: BrowserPoolOptions =
+      this.egressProxyServer !== undefined
+        ? {
+            proxy: {
+              proxyServer: this.egressProxyServer,
+              credentials: this.proxyCredentials,
+            },
+          }
+        : {}
+    const pool = new BrowserPool(this.xvfb, profilesDir, options)
     this.pools.set(profilesDir, pool)
     return pool
   }
