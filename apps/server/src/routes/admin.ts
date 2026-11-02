@@ -5,6 +5,8 @@ import type { DbClient } from '@webridge/db';
 import type { Vault } from '@webridge/vault';
 import type { Capability, Connection, Client, Grant } from '@webridge/core';
 import { randomBytes, createHash } from 'node:crypto';
+import type { ConnectorRegistry } from '../registry.js';
+import { openBrowserSession, closeBrowserSession, startLogin, stopLogin } from '../dispatchers/browser.js';
 
 interface AdminDeps {
   db: DbClient;
@@ -12,11 +14,11 @@ interface AdminDeps {
   connectionMap: Map<string, Connection>;
   clientMap: Map<string, Client>;
   grantMap: Map<string, Grant[]>;
-  capabilityMap: Map<string, Capability>;
+  connectorRegistry: ConnectorRegistry;
 }
 
 export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps) {
-  const { connectionMap, clientMap, grantMap, capabilityMap } = deps;
+  const { connectionMap, clientMap, grantMap, connectorRegistry } = deps;
 
   // ── Connections ────────────────────────────────────────────────────────
 
@@ -139,19 +141,105 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
     return reply.status(201).send(grant);
   });
 
-  // ── Capabilities (read-only in M0) ─────────────────────────────────────
+  // ── Capabilities ─────────────────────────────────────────────────────
 
+  // Dynamic capability registration (used by tests and runtime additions)
   app.post<{
     Body: { connector_id: string; capability: Capability };
   }>('/admin/capabilities', async (request, reply) => {
-    const key = `${request.body.connector_id}:${request.body.capability.id}`;
-    capabilityMap.set(key, request.body.capability);
-    return reply.status(201).send({ ok: true, key });
-  });
+    const { connector_id, capability } = request.body
+    // Register as a single-capability connector (or merge into existing)
+    const existing = connectorRegistry.getManifest(connector_id)
+    const caps = existing?.compiled.capabilities ?? {}
+    caps[capability.id] = capability
+    connectorRegistry.register(connector_id, {
+      id: connector_id,
+      version: existing?.compiled.version ?? '0.0.0',
+      title: existing?.compiled.title ?? connector_id,
+      transport: existing?.compiled.transport ?? capability.transport,
+      capabilities: caps,
+    })
+    return reply.status(201).send({ ok: true, key: `${connector_id}:${capability.id}` })
+  })
 
-  app.get('/admin/capabilities', async () => {
-    return {
-      capabilities: Array.from(capabilityMap.entries()).map(([key, cap]) => ({ key, ...cap })),
-    };
-  });
+  app.get('/admin/capabilities', async (request, reply) => {
+    const connectorId = (request.query as { connector_id?: string })['connector_id']
+    if (connectorId) {
+      const caps = connectorRegistry.listCapabilities(connectorId)
+      return { capabilities: caps }
+    }
+    return { capabilities: [] }
+  })
+
+  // ── Browser sessions & login (M1) ────────────────────────────────────
+
+  app.post<{
+    Body: { connection_id: string; profile_path?: string };
+  }>('/admin/browser/open', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['connection_id'],
+        properties: {
+          connection_id: { type: 'string' },
+          profile_path: { type: 'string' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const conn = connectionMap.get(request.body.connection_id)
+    if (!conn) return reply.status(404).send({ error: 'Connection not found' })
+    const profilePath = request.body.profile_path ?? `/profiles/${conn.id}`
+    try {
+      const result = await openBrowserSession(conn.id, profilePath)
+      return reply.status(201).send(result)
+    } catch (e) {
+      return reply.status(502).send({ error: (e as Error).message })
+    }
+  })
+
+  app.post<{ Params: { id: string } }>('/admin/browser/:id/close', async (request, reply) => {
+    try {
+      await closeBrowserSession(request.params.id)
+      return reply.send({ ok: true })
+    } catch (e) {
+      return reply.status(502).send({ error: (e as Error).message })
+    }
+  })
+
+  app.post<{
+    Body: { connection_id: string; url: string; qr_selector?: string };
+  }>('/admin/login/start', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['connection_id', 'url'],
+        properties: {
+          connection_id: { type: 'string' },
+          url: { type: 'string' },
+          qr_selector: { type: 'string' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    try {
+      const result = await startLogin(
+        request.body.connection_id,
+        request.body.url,
+        request.body.qr_selector,
+      )
+      return reply.status(201).send(result)
+    } catch (e) {
+      return reply.status(502).send({ error: (e as Error).message })
+    }
+  })
+
+  app.post<{ Params: { id: string } }>('/admin/login/:id/stop', async (request, reply) => {
+    try {
+      await stopLogin(request.params.id)
+      return reply.send({ ok: true })
+    } catch (e) {
+      return reply.status(502).send({ error: (e as Error).message })
+    }
+  })
 }

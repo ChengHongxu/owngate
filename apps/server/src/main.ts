@@ -4,23 +4,22 @@
 import Fastify from 'fastify';
 import { randomBytes, createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { DbClient } from '@webridge/db';
 import { Vault } from '@webridge/vault';
 import { redact } from '@webridge/vault';
 import type {
   InvokeServices, InvokeOptions,
   CapabilityRegistry, ConnectionStore, AuthStore,
-  CacheStore, AuditStore, Dispatcher, CachedResult,
+  CacheStore, AuditStore, CachedResult,
 } from '@webridge/core';
-import {
-  invoke,
-  err,
-  fail,
-} from '@webridge/core';
-import type { Capability, Connection, Client, Grant, ResultEnvelope } from '@webridge/core';
+import { invoke } from '@webridge/core';
+import type { Capability, Connection, Client, Grant } from '@webridge/core';
 import { registerMcpRoutes } from './routes/mcp.js';
 import { registerRestRoutes } from './routes/rest.js';
 import { registerAdminRoutes } from './routes/admin.js';
+import { ConnectorRegistry } from './registry.js';
+import { UnifiedDispatcher } from './dispatchers/index.js';
 
 const PORT = parseInt(process.env['PORT'] ?? '3000', 10);
 const DB_PATH = process.env['DB_PATH'] ?? './webridge.db';
@@ -48,22 +47,22 @@ export async function buildServer() {
   const db = new DbClient(DB_PATH);
   const vault = new Vault(MASTER_KEY);
 
-  // ── In-memory caches (M0 — will replace with DB-backed encrypted cache in M1) ──
+  // ── Connector registry — loads YAML manifests from connectors/ dir ────────
+  const connectorRegistry = new ConnectorRegistry(vault);
+  const connectorsDir = process.env['CONNECTORS_DIR'] ?? resolve(process.cwd(), 'connectors');
+  connectorRegistry.loadDirectory(connectorsDir);
+
+  // ── In-memory stores (M1 — backed by DB worker for persistence) ──────────
   const memCache = new Map<string, CachedResult>();
-  const auditBuffer: unknown[] = [];
 
-  // ── Service implementations ───────────────────────────────────────────────
-  // These are thin adapters over the DB worker. In production, capability
-  // registry and connection store will be populated from the DB on startup
-  // and invalidated on config changes.
-
-  const capabilityMap = new Map<string, Capability>();
   const connectionMap = new Map<string, Connection>();
   const clientMap = new Map<string, Client>();
   const grantMap = new Map<string, Grant[]>();
 
+  // ── Service implementations ───────────────────────────────────────────────
+
   const capRegistry: CapabilityRegistry = {
-    get: (connectorId, capabilityId) => capabilityMap.get(`${connectorId}:${capabilityId}`),
+    get: (connectorId, capabilityId) => connectorRegistry.getCapability(connectorId, capabilityId),
   };
 
   const connStore: ConnectionStore = {
@@ -101,8 +100,7 @@ export async function buildServer() {
 
   const auditStore: AuditStore = {
     append: (entry) => {
-      auditBuffer.push({ ...entry, at: new Date().toISOString() });
-      // Flush to DB asynchronously (fire-and-forget for M0)
+      // Flush to DB asynchronously (fire-and-forget)
       db.appendAuditLog({
         action: entry.action,
         client_id: entry.client_id,
@@ -116,36 +114,10 @@ export async function buildServer() {
     },
   };
 
-  const dispatcher: Dispatcher = {
-    dispatch: async (connection, capability, input) => {
-      // M0 stub dispatcher — returns a fixed response for the test connector
-      // Real dispatchers (HTTP, browser) are implemented in M3/M1 respectively.
-      const source = {
-        connection_id: connection.id,
-        connection_label: connection.label,
-        capability_id: capability.id,
-        support: connection.capability_states[capability.id] ?? capability.support,
-      };
-
-      if (connection.connector_id === 'test-connector') {
-        return {
-          outcome: 'success' as const,
-          data: { message: 'pong', connection: connection.label, capability: capability.id },
-          error: null,
-          fields: {},
-          source,
-          data_time: new Date().toISOString(),
-          queried_at: new Date().toISOString(),
-          cache: null,
-          warnings: [],
-        };
-      }
-
-      return fail(
-        err('NOT_SUPPORTED', `No dispatcher for connector: ${connection.connector_id}`),
-        source,
-      );
-    },
+  const unifiedDispatcher = new UnifiedDispatcher(connectorRegistry);
+  const dispatcher = {
+    dispatch: (connection: Connection, capability: Capability, input: unknown) =>
+      unifiedDispatcher.dispatch(connection, capability, input),
   };
 
   const services: InvokeServices = {
@@ -174,9 +146,16 @@ export async function buildServer() {
   // Register route modules
   await registerRestRoutes(app, { services, invokeOpts, db, vault });
   await registerMcpRoutes(app, { services, invokeOpts });
-  await registerAdminRoutes(app, { db, vault, connectionMap, clientMap, grantMap, capabilityMap });
+  await registerAdminRoutes(app, {
+    db,
+    vault,
+    connectionMap,
+    clientMap,
+    grantMap,
+    connectorRegistry,
+  });
 
-  return { app, db, vault, services, invokeOpts };
+  return { app, db, vault, services, invokeOpts, connectorRegistry };
 }
 
 // ── Start ──────────────────────────────────────────────────────────────────
