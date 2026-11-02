@@ -30,6 +30,23 @@ export interface CompiledConnector {
   transport: Transport;
   capabilities: Record<string, Capability>;
   login?: LoginConfig;
+  // Manifest blocks preserved for runtime use (dispatcher, registry)
+  config?: Record<string, unknown>;
+  auth?: { type: string; fields?: Record<string, unknown> };
+  http?: {
+    base: string;
+    headers?: Record<string, string>;
+    rate_limit?: { rpm: number };
+    timeout_ms?: number;
+  };
+  // Per-capability runtime definitions (request, output mapping, conditions)
+  capabilityDefs?: Record<string, {
+    request: { method: string; path: string };
+    output?: Record<string, OutputFieldDef>;
+    success_when?: string;
+    auth_failed_when?: string;
+    data_time?: { now: true };
+  }>;
 }
 
 // ── Internal manifest shapes ───────────────────────────────────────────────
@@ -571,8 +588,23 @@ export function loadManifest(yamlString: string): CompiledConnector {
 
   const transport = transportForAccess(manifest.access);
   const capabilities: Record<string, Capability> = {};
+  const capabilityDefs: Record<string, {
+    request: { method: string; path: string };
+    output?: Record<string, OutputFieldDef>;
+    success_when?: string;
+    auth_failed_when?: string;
+    data_time?: { now: true };
+  }> = {};
+
   for (const def of manifest.capabilities) {
     capabilities[def.id] = compileCapability(def, transport);
+    capabilityDefs[def.id] = {
+      request: def.request,
+      ...(def.output ? { output: def.output } : {}),
+      ...(def.success_when ? { success_when: def.success_when } : {}),
+      ...(def.auth_failed_when ? { auth_failed_when: def.auth_failed_when } : {}),
+      ...(def.data_time ? { data_time: def.data_time } : {}),
+    };
   }
 
   return {
@@ -582,6 +614,10 @@ export function loadManifest(yamlString: string): CompiledConnector {
     transport,
     capabilities,
     ...(manifest.login !== undefined ? { login: manifest.login } : {}),
+    ...(manifest.config !== undefined ? { config: manifest.config } : {}),
+    ...(manifest.auth !== undefined ? { auth: manifest.auth } : {}),
+    ...(manifest.http !== undefined ? { http: manifest.http } : {}),
+    capabilityDefs,
   };
 }
 

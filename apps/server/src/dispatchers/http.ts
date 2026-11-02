@@ -36,6 +36,7 @@ export async function dispatchHttp(
   outputDefs?: Record<string, { from: string; transform?: string; unit?: string; scope?: string; sensitivity?: string }>,
   successWhen?: string,
   authFailedWhen?: string,
+  requestDef?: { method: string; path: string },
 ): Promise<ResultEnvelope> {
   const source = {
     connection_id: connection.id,
@@ -48,6 +49,10 @@ export async function dispatchHttp(
     return fail(err('INTERNAL_ERROR', 'No HTTP manifest for this connector'), source)
   }
 
+  if (!requestDef) {
+    return fail(err('INTERNAL_ERROR', 'No request definition for this capability'), source)
+  }
+
   // ── Render request URL and headers from templates ────────────────────────
   const tplCtx = {
     config: connection.config as Record<string, unknown>,
@@ -55,20 +60,42 @@ export async function dispatchHttp(
     input: (input as Record<string, unknown>) ?? {},
   }
 
-  let url: string
+  let baseUrl: string
+  let path: string
   try {
-    const rendered = renderTemplate(manifestHttp.base, tplCtx, { urlEncodeInput: true })
-    url = rendered.value
+    const renderedBase = renderTemplate(manifestHttp.base, tplCtx)
+    baseUrl = renderedBase.value
+    const renderedPath = renderTemplate(requestDef.path, tplCtx, { urlEncodeInput: true })
+    path = renderedPath.value
   } catch (e) {
     return fail(err('INVALID_PARAMS', `URL template error: ${(e as Error).message}`), source)
+  }
+
+  // Construct full URL, ensure path doesn't escape base origin
+  const url = new URL(path, baseUrl).toString()
+  if (!url.startsWith(baseUrl)) {
+    return fail(err('INTERNAL_ERROR', 'Request path escapes base URL'), source)
+  }
+
+  // Render headers
+  const headers: Record<string, string> = {}
+  if (manifestHttp.headers) {
+    for (const [key, template] of Object.entries(manifestHttp.headers)) {
+      try {
+        const rendered = renderTemplate(template, tplCtx)
+        headers[key] = rendered.value
+      } catch (e) {
+        return fail(err('INVALID_PARAMS', `Header "${key}" template error: ${(e as Error).message}`), source)
+      }
+    }
   }
 
   // ── Execute HTTP request ─────────────────────────────────────────────────
   let result: HttpExecResult
   try {
     const resp = await fetch(url, {
-      method: 'GET',
-      headers: manifestHttp.headers ?? {},
+      method: requestDef.method,
+      headers,
       signal: AbortSignal.timeout(manifestHttp.timeout_ms ?? 10000),
     })
     const text = await resp.text()

@@ -34,7 +34,8 @@ const CAP: Capability = {
   support: { status: 'supported' },
 };
 
-const HTTP = { base: 'https://site.example/api/balance' };
+const HTTP = { base: 'https://site.example' };
+const REQUEST_DEF = { method: 'GET', path: '/api/balance' };
 
 function respondWith(status: number, body: unknown = {}): void {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status })));
@@ -47,30 +48,30 @@ afterEach(() => {
 describe('dispatchHttp error codes', () => {
   it.each([500, 502, 503])('site %i → UPSTREAM_ERROR, retryable', async (status) => {
     respondWith(status);
-    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP);
+    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, undefined, undefined, REQUEST_DEF);
     expect(env.status).toBe('error');
     expect(env.error).toMatchObject({ code: 'UPSTREAM_ERROR', retryable: true });
   });
 
   it.each([400, 404, 422])('site %i → UPSTREAM_ERROR, not retryable', async (status) => {
     respondWith(status);
-    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP);
+    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, undefined, undefined, REQUEST_DEF);
     expect(env.error).toMatchObject({ code: 'UPSTREAM_ERROR', retryable: false });
   });
 
   it('a failed success_when uses the same 5xx / 4xx rule', async () => {
     respondWith(503);
-    const e5 = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, 'status == 200');
+    const e5 = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, 'status == 200', undefined, REQUEST_DEF);
     expect(e5.error).toMatchObject({ code: 'UPSTREAM_ERROR', retryable: true });
 
     respondWith(404);
-    const e4 = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, 'status == 200');
+    const e4 = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, 'status == 200', undefined, REQUEST_DEF);
     expect(e4.error).toMatchObject({ code: 'UPSTREAM_ERROR', retryable: false });
   });
 
   it('auth_failed_when → AUTH_REJECTED', async () => {
     respondWith(401);
-    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, undefined, 'status == 401');
+    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, undefined, 'status == 401', REQUEST_DEF);
     expect(env.error).toMatchObject({ code: 'AUTH_REJECTED', retryable: false });
     expect(env.status).toBe('error');
   });
@@ -79,13 +80,13 @@ describe('dispatchHttp error codes', () => {
     vi.stubGlobal('fetch', vi.fn(async () => {
       throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
     }));
-    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP);
+    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, undefined, undefined, REQUEST_DEF);
     expect(env.error).toMatchObject({ code: 'UPSTREAM_TIMEOUT', retryable: true });
   });
 
   it('a 2xx result is ok', async () => {
     respondWith(200, { balance: 1 });
-    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP);
+    const env = await dispatchHttp(CONN, CAP, {}, {}, HTTP, undefined, undefined, undefined, REQUEST_DEF);
     expect(env.status).toBe('ok');
     expect(env.data).toEqual({ balance: 1 });
   });

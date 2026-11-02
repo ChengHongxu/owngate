@@ -1,20 +1,25 @@
 connector: newapi
-version: 0.1.0
-title: New API 中转站
+version: 1.0.0
+title: New API / One API 中转站
 access: official_api
 
 config:
   base_url: { type: string, format: uri, label: 站点网址 }
+  user_id: { type: string, label: 用户 ID, help: 在站点"个人设置"中查看 }
+  quota_per_unit: { type: number, label: 配额单位, default: 500000, help: "500000 = $1，在站点系统设置中配置" }
 
 auth:
   type: bearer
   fields:
-    access_token: { secret: true, label: 访问令牌 }
+    access_token: { secret: true, label: 系统访问令牌, help: 在"个人设置 → 生成系统访问令牌"中创建 }
 
 http:
   base: "{{config.base_url}}"
   headers:
     Authorization: "Bearer {{secret.access_token}}"
+    New-Api-User: "{{config.user_id}}"
+  rate_limit: { rpm: 60 }
+  timeout_ms: 10000
 
 capabilities:
   - id: account.balance
@@ -22,15 +27,17 @@ capabilities:
     effect: read
     cache: { ttl: 300 }
     title: 账户余额
-    description: 查询账户余额与用量
+    description: 查询当前用户的配额余额与用量统计
     request:
       method: GET
       path: /api/user/self
     success_when: "$.success == true"
+    auth_failed_when: "status == 401 || status == 403"
     output:
       quota:
         from: $.data.quota
-        unit: ''
+        transform: quota_to_usd
+        unit: USD
         scope: account
         sensitivity: financial
       username:
@@ -43,3 +50,4 @@ capabilities:
         unit: ''
         scope: account
         sensitivity: pii
+    data_time: { now: true }

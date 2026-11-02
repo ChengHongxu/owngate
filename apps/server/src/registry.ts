@@ -52,13 +52,11 @@ export class ConnectorRegistry {
 
   loadFile(path: string): CompiledConnector {
     const compiled = loadManifestFile(path)
-    // Re-parse the raw YAML to extract http block and per-capability request details.
-    // loadManifestFile returns compiled Capabilities but we also need raw request defs
-    // for the HTTP dispatcher. For now store the compiled data with placeholder defs.
-    // TODO M3: store full manifest raw alongside compiled for complete request dispatch.
+    // Loader now returns full manifest data (http, config, auth, capabilityDefs)
     const entry: ManifestEntry = {
       compiled,
-      capabilityDefs: {},
+      ...(compiled.http ? { http: compiled.http } : {}),
+      capabilityDefs: compiled.capabilityDefs ?? {},
       ...(compiled.login !== undefined ? { login: compiled.login } : {}),
     }
     this.manifests.set(compiled.id, entry)
