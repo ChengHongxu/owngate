@@ -1,0 +1,45 @@
+connector: newapi
+version: 0.1.0
+title: New API 中转站
+access: official_api
+
+config:
+  base_url: { type: string, format: uri, label: 站点网址 }
+
+auth:
+  type: bearer
+  fields:
+    access_token: { secret: true, label: 访问令牌 }
+
+http:
+  base: "{{config.base_url}}"
+  headers:
+    Authorization: "Bearer {{secret.access_token}}"
+
+capabilities:
+  - id: account.balance
+    kind: query
+    effect: read
+    cache: { ttl: 300 }
+    title: 账户余额
+    description: 查询账户余额与用量
+    request:
+      method: GET
+      path: /api/user/self
+    success_when: "$.success == true"
+    output:
+      quota:
+        from: $.data.quota
+        unit: ''
+        scope: account
+        sensitivity: financial
+      username:
+        from: $.data.username
+        unit: ''
+        scope: account
+        sensitivity: pii
+      email:
+        from: $.data.email
+        unit: ''
+        scope: account
+        sensitivity: pii

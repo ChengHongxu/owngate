@@ -215,6 +215,26 @@ export class DbClient {
     return this.call<WebauthnCredentialRow | undefined>('deleteWebauthnCredential', args);
   }
 
+  // Connection credentials (encrypted)
+  upsertCredential(args: { connection_id: string; key: string; ciphertext: string; iv: string; auth_tag: string }) {
+    return this.call<void>('upsertCredential', args);
+  }
+  listCredentials(connection_id: string) {
+    return this.call<Array<{ key: string; ciphertext: string; iv: string; auth_tag: string; updated_at: string }>>(
+      'listCredentials',
+      { connection_id },
+    );
+  }
+  listAllCredentials() {
+    return this.call<Array<{ connection_id: string; key: string; ciphertext: string; iv: string; auth_tag: string }>>(
+      'listAllCredentials',
+      {},
+    );
+  }
+  deleteCredentials(connection_id: string) {
+    return this.call<void>('deleteCredentials', { connection_id });
+  }
+
   // Login sessions
   insertLoginSession(args: { id: string; user_id: string; expires_at: string }) {
     return this.call<LoginSessionRow>('insertLoginSession', args);

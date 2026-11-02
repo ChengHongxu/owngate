@@ -95,6 +95,8 @@ async function restoreState(
   connectionMap: Map<string, Connection>,
   clientMap: Map<string, Client>,
   grantMap: Map<string, Grant[]>,
+  vault: Vault,
+  connectorRegistry: ConnectorRegistry,
 ): Promise<void> {
   const [connections, clients, grants] = await Promise.all([
     db.listConnections(),
@@ -132,6 +134,23 @@ async function restoreState(
     });
     grantMap.set(row.client_id, list);
   }
+
+  // Load and decrypt credentials
+  const credRows = await db.listAllCredentials();
+  for (const row of credRows) {
+    const existing = connectorRegistry.getCredentials(row.connection_id) ?? {};
+    try {
+      const decrypted = vault.decrypt({
+        ciphertext: row.ciphertext,
+        iv: row.iv,
+        auth_tag: row.auth_tag,
+      });
+      existing[row.key] = decrypted;
+      connectorRegistry.setCredentials(row.connection_id, existing);
+    } catch (e) {
+      console.error(`[restore] Failed to decrypt credential ${row.connection_id}:${row.key}:`, (e as Error).message);
+    }
+  }
 }
 
 export interface BuildServerOptions {
@@ -156,7 +175,7 @@ export async function buildServer(options: BuildServerOptions = {}) {
   const connectionMap = new Map<string, Connection>();
   const clientMap = new Map<string, Client>();
   const grantMap = new Map<string, Grant[]>();
-  await restoreState(db, connectionMap, clientMap, grantMap);
+  await restoreState(db, connectionMap, clientMap, grantMap, vault, connectorRegistry);
 
   // ── Service implementations ───────────────────────────────────────────────
 

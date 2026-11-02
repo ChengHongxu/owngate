@@ -59,3 +59,4 @@ deploy/secrets/
 
 # TS build info
 *.tsbuildinfo
+deploy/secrets/

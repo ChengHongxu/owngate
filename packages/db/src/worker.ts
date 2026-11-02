@@ -319,6 +319,56 @@ const handlers: Record<string, Handler> = {
       .get();
   },
 
+  // Connection credentials
+  async upsertCredential(args) {
+    const val = args as typeof schema.credentials.$inferInsert;
+    return orm.insert(schema.credentials)
+      .values({ ...val, updated_at: new Date().toISOString() })
+      .onConflictDoUpdate({
+        target: [schema.credentials.connection_id, schema.credentials.key],
+        set: {
+          ciphertext: val.ciphertext,
+          iv: val.iv,
+          auth_tag: val.auth_tag,
+          updated_at: new Date().toISOString(),
+        },
+      })
+      .run();
+  },
+
+  async listCredentials(args) {
+    const { connection_id } = args as { connection_id: string };
+    return orm.select({
+      key: schema.credentials.key,
+      ciphertext: schema.credentials.ciphertext,
+      iv: schema.credentials.iv,
+      auth_tag: schema.credentials.auth_tag,
+      updated_at: schema.credentials.updated_at,
+    })
+      .from(schema.credentials)
+      .where(eq(schema.credentials.connection_id, connection_id))
+      .all();
+  },
+
+  async listAllCredentials() {
+    return orm.select({
+      connection_id: schema.credentials.connection_id,
+      key: schema.credentials.key,
+      ciphertext: schema.credentials.ciphertext,
+      iv: schema.credentials.iv,
+      auth_tag: schema.credentials.auth_tag,
+    })
+      .from(schema.credentials)
+      .all();
+  },
+
+  async deleteCredentials(args) {
+    const { connection_id } = args as { connection_id: string };
+    return orm.delete(schema.credentials)
+      .where(eq(schema.credentials.connection_id, connection_id))
+      .run();
+  },
+
   // Login sessions
   async insertLoginSession(args) {
     const val = args as typeof schema.login_sessions.$inferInsert;
