@@ -2,7 +2,14 @@ export { XvfbManager } from './xvfb.js'
 export {
   BrowserPool,
   type BrowserEntry,
+  type BrowserPoolOptions,
 } from './pool.js'
+export {
+  ProxyCredentialStore,
+  proxyServerFlag,
+  proxyServerFlagWithAuth,
+  type ProxyConfig,
+} from './proxy.js'
 export { AsyncMutex } from './mutex.js'
 export {
   signRequest,

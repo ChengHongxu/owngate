@@ -4,12 +4,32 @@
 import { chromium, type BrowserContext } from 'playwright'
 import { AsyncMutex } from './mutex.js'
 import { XvfbManager } from './xvfb.js'
+import { type ProxyCredentialStore, proxyServerFlag } from './proxy.js'
 
 export interface BrowserEntry {
   context: BrowserContext
   display: string
   connectionId: string
   lock: AsyncMutex
+  /**
+   * Proxy username used by this browser (the connection id). Present only when
+   * the pool was built with a proxy. Safe to log — the password never is.
+   */
+  proxyUsername?: string
+}
+
+export interface BrowserPoolOptions {
+  idleTimeoutMs?: number
+  /**
+   * Egress proxy (design §4.4.1/§4.4.6). When absent the browser talks to the
+   * network directly, which the design does not permit in production — wire this
+   * up wherever the pool is constructed.
+   */
+  proxy?: {
+    /** e.g. 'http://egress:3128' */
+    proxyServer: string
+    credentials: ProxyCredentialStore
+  }
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000
@@ -17,13 +37,15 @@ const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000
 export class BrowserPool {
   private entries = new Map<string, BrowserEntry & { idleTimer: NodeJS.Timeout }>()
   private idleTimeoutMs: number
+  private proxy: BrowserPoolOptions['proxy']
 
   constructor(
     private readonly xvfb: XvfbManager,
     private readonly profilesDir: string,
-    options?: { idleTimeoutMs?: number },
+    options?: BrowserPoolOptions,
   ) {
     this.idleTimeoutMs = options?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+    this.proxy = options?.proxy
   }
 
   async acquire(connectionId: string): Promise<BrowserEntry> {
@@ -62,11 +84,37 @@ export class BrowserPool {
     const { display } = await this.xvfb.start(connectionId)
     const profilePath = `${this.profilesDir}/${connectionId}`
 
+    // Proxy wiring (design §4.4.1: 出网必经 egress-proxy).
+    //
+    // Credentials go in Playwright's `proxy` option, never in --proxy-server:
+    // Chromium parses `--proxy-server=http://user:pass@host:port` as a malformed
+    // proxy and drops it, failing every request with ERR_NO_SUPPORTED_PROXIES
+    // (verified against the bundled Chromium 1248). Playwright instead passes the
+    // bare server to --proxy-server and answers the proxy's 407 challenge over
+    // CDP, which the egress-proxy accepts (Proxy-Authorization: Basic ...).
+    //
+    // bypass: '<-loopback>' is what forces loopback through the proxy. Chromium
+    // has *implicit* loopback bypass rules; an empty bypass list does not clear
+    // them (measured: `--proxy-bypass-list=` still sent 127.0.0.1 direct), only
+    // the '<-loopback>' token subtracts them. Without it, a page could reach
+    // host services (db, redis, the API) without ever touching the proxy.
+    const proxyCreds = this.proxy?.credentials.get(connectionId)
+    const proxyOption =
+      this.proxy && proxyCreds
+        ? {
+            server: proxyServerFlag(this.proxy.proxyServer),
+            username: proxyCreds.username,
+            password: proxyCreds.password,
+            bypass: '<-loopback>',
+          }
+        : undefined
+
     const context = await chromium.launchPersistentContext(profilePath, {
       headless: false,
       // Playwright defaults this to false, which injects --no-sandbox.
       // Design doc §4.4.1/§12.2 forbids running without the Chromium sandbox.
       chromiumSandbox: true,
+      ...(proxyOption ? { proxy: proxyOption } : {}),
       args: [
         '--disable-blink-features=AutomationControlled',
         '--disable-gpu',
@@ -96,6 +144,10 @@ export class BrowserPool {
       connectionId,
       lock: new AsyncMutex(),
       idleTimer: this.startIdleTimer(connectionId),
+      // Spread rather than `proxyUsername: proxyCreds?.username`: under
+      // exactOptionalPropertyTypes an explicit undefined is not assignable to an
+      // optional `string` property. Username only — never log the password.
+      ...(proxyCreds ? { proxyUsername: proxyCreds.username } : {}),
     }
     this.entries.set(connectionId, entry)
     return entry

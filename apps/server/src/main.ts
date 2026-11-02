@@ -2,8 +2,9 @@
 // and exposes three entry points: REST, MCP (Streamable HTTP), and admin backend.
 
 import Fastify from 'fastify';
+import fastifyStatic from '@fastify/static';
 import { randomBytes, createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DbClient } from '@webridge/db';
 import { Vault } from '@webridge/vault';
@@ -18,6 +19,8 @@ import type { Capability, Connection, Client, Grant } from '@webridge/core';
 import { registerMcpRoutes } from './routes/mcp.js';
 import { registerRestRoutes } from './routes/rest.js';
 import { registerAdminRoutes } from './routes/admin.js';
+import { registerScreenRoutes } from './routes/screen.js';
+import { startLogin, stopLogin } from './dispatchers/browser.js';
 import { ConnectorRegistry } from './registry.js';
 import { UnifiedDispatcher } from './dispatchers/index.js';
 
@@ -154,6 +157,33 @@ export async function buildServer() {
     grantMap,
     connectorRegistry,
   });
+
+  // Remote screen forwarding (design §4.4.5: screen only through the server).
+  // M1 has no admin auth yet, so the gates are permissive stand-ins; the auth
+  // module replaces them. Returning a user id here keeps the routes reachable.
+  await registerScreenRoutes(app, {
+    getAdminUserId: async () => 'admin-local',
+    hasStepUp: async () => true,
+    startLogin,
+    stopLogin,
+    audit: (entry) => auditStore.append({ client_id: entry.client_id, action: entry.action, target: entry.target, detail: entry.detail }),
+    browserRpcUrl: process.env['BROWSER_RPC_URL'] ?? 'http://browser:4000',
+  });
+
+  // Admin web UI (built by apps/web). Served from the server so nginx only
+  // needs a single upstream.
+  const webRoot = process.env['WEB_ROOT'] ?? '';
+  if (webRoot !== '' && existsSync(webRoot)) {
+    await app.register(fastifyStatic, { root: webRoot, prefix: '/' });
+    // SPA fallback: unknown non-API paths return index.html
+    app.setNotFoundHandler(async (request, reply) => {
+      const url = request.raw.url ?? '/';
+      if (url.startsWith('/api') || url.startsWith('/admin') || url.startsWith('/mcp') || url.startsWith('/auth') || url.startsWith('/ws') || url.startsWith('/health')) {
+        return reply.status(404).send({ error: 'Not Found' });
+      }
+      return reply.sendFile('index.html');
+    });
+  }
 
   return { app, db, vault, services, invokeOpts, connectorRegistry };
 }

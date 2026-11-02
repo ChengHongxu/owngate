@@ -6,6 +6,12 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import type { DbRequest, DbResponse } from './types.js';
+import type * as schema from './schema.js';
+
+type AdminUserRow = typeof schema.admin_users.$inferSelect;
+type WebauthnCredentialRow = typeof schema.webauthn_credentials.$inferSelect;
+type TotpSecretRow = typeof schema.totp_secrets.$inferSelect;
+type LoginSessionRow = typeof schema.login_sessions.$inferSelect;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -141,6 +147,71 @@ export class DbClient {
   }
   getLastAuditEntry() {
     return this.call<unknown | undefined>('getLastAuditEntry');
+  }
+
+  // ── Admin auth ─────────────────────────────────────────────
+  getAdminByUsername(username: string) {
+    return this.call<AdminUserRow | undefined>('getAdminByUsername', { username });
+  }
+  getAdminById(id: string) {
+    return this.call<AdminUserRow | undefined>('getAdminById', { id });
+  }
+  countAdminUsers() {
+    return this.call<number>('countAdminUsers');
+  }
+  createAdminUser(args: { id: string; username: string; password_hash: string }) {
+    return this.call<AdminUserRow>('createAdminUser', args);
+  }
+  updateAdminPassword(args: { id: string; password_hash: string }) {
+    return this.call<AdminUserRow>('updateAdminPassword', args);
+  }
+  setTotpEnabled(args: { id: string; totp_enabled: boolean }) {
+    return this.call<AdminUserRow>('setTotpEnabled', args);
+  }
+
+  // TOTP secrets (ciphertext produced by Vault)
+  getTotpSecret(user_id: string) {
+    return this.call<TotpSecretRow | undefined>('getTotpSecret', { user_id });
+  }
+  upsertTotpSecret(args: { user_id: string; ciphertext: string; iv: string; auth_tag: string }) {
+    return this.call<TotpSecretRow>('upsertTotpSecret', args);
+  }
+  deleteTotpSecret(user_id: string) {
+    return this.call<TotpSecretRow | undefined>('deleteTotpSecret', { user_id });
+  }
+
+  // WebAuthn credentials
+  listWebauthnCredentials(user_id: string) {
+    return this.call<WebauthnCredentialRow[]>('listWebauthnCredentials', { user_id });
+  }
+  getWebauthnCredentialByCredentialId(credential_id: string) {
+    return this.call<WebauthnCredentialRow | undefined>('getWebauthnCredentialByCredentialId', { credential_id });
+  }
+  insertWebauthnCredential(args: {
+    id: string; user_id: string; credential_id: string; public_key: string;
+    counter: number; transports: unknown;
+  }) {
+    return this.call<WebauthnCredentialRow>('insertWebauthnCredential', args);
+  }
+  updateWebauthnCounter(args: { credential_id: string; counter: number }) {
+    return this.call<WebauthnCredentialRow>('updateWebauthnCounter', args);
+  }
+  deleteWebauthnCredential(args: { id: string; user_id: string }) {
+    return this.call<WebauthnCredentialRow | undefined>('deleteWebauthnCredential', args);
+  }
+
+  // Login sessions
+  insertLoginSession(args: { id: string; user_id: string; expires_at: string }) {
+    return this.call<LoginSessionRow>('insertLoginSession', args);
+  }
+  getLoginSession(id: string) {
+    return this.call<LoginSessionRow | undefined>('getLoginSession', { id });
+  }
+  deleteLoginSession(id: string) {
+    return this.call<LoginSessionRow | undefined>('deleteLoginSession', { id });
+  }
+  deleteExpiredLoginSessions(now: string) {
+    return this.call<LoginSessionRow[]>('deleteExpiredLoginSessions', { now });
   }
 
   // ── Escape hatch for migrations ───────────────────────────

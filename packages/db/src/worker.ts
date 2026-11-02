@@ -8,7 +8,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { eq, desc } from 'drizzle-orm';
+import { and, eq, desc, count, lt } from 'drizzle-orm';
 import * as schema from './schema.js';
 import type { DbRequest, DbResponse } from './types.js';
 
@@ -180,6 +180,145 @@ const handlers: Record<string, Handler> = {
     return orm.query.grants.findMany({
       where: (g, { eq }) => eq(g.client_id, client_id),
     });
+  },
+
+  // Admin users (auth)
+  async getAdminByUsername(args) {
+    const { username } = args as { username: string };
+    return orm.query.admin_users.findFirst({ where: (u, { eq }) => eq(u.username, username) });
+  },
+
+  async getAdminById(args) {
+    const { id } = args as { id: string };
+    return orm.query.admin_users.findFirst({ where: (u, { eq }) => eq(u.id, id) });
+  },
+
+  async countAdminUsers() {
+    const row = orm.select({ n: count() }).from(schema.admin_users).get();
+    return row?.n ?? 0;
+  },
+
+  async createAdminUser(args) {
+    const val = args as typeof schema.admin_users.$inferInsert;
+    return orm.insert(schema.admin_users).values(val).returning().get();
+  },
+
+  async updateAdminPassword(args) {
+    const { id, password_hash } = args as { id: string; password_hash: string };
+    return orm.update(schema.admin_users)
+      .set({ password_hash })
+      .where(eq(schema.admin_users.id, id))
+      .returning()
+      .get();
+  },
+
+  async setTotpEnabled(args) {
+    const { id, totp_enabled } = args as { id: string; totp_enabled: boolean };
+    return orm.update(schema.admin_users)
+      .set({ totp_enabled })
+      .where(eq(schema.admin_users.id, id))
+      .returning()
+      .get();
+  },
+
+  // TOTP secrets (encrypted via Vault)
+  async getTotpSecret(args) {
+    const { user_id } = args as { user_id: string };
+    return orm.query.totp_secrets.findFirst({ where: (t, { eq }) => eq(t.user_id, user_id) });
+  },
+
+  async upsertTotpSecret(args) {
+    const val = args as typeof schema.totp_secrets.$inferInsert;
+    return orm.insert(schema.totp_secrets)
+      .values(val)
+      .onConflictDoUpdate({
+        target: schema.totp_secrets.user_id,
+        set: {
+          ciphertext: val.ciphertext,
+          iv: val.iv,
+          auth_tag: val.auth_tag,
+          updated_at: new Date().toISOString(),
+        },
+      })
+      .returning()
+      .get();
+  },
+
+  async deleteTotpSecret(args) {
+    const { user_id } = args as { user_id: string };
+    return orm.delete(schema.totp_secrets)
+      .where(eq(schema.totp_secrets.user_id, user_id))
+      .returning()
+      .get();
+  },
+
+  // WebAuthn credentials
+  async listWebauthnCredentials(args) {
+    const { user_id } = args as { user_id: string };
+    return orm.select().from(schema.webauthn_credentials)
+      .where(eq(schema.webauthn_credentials.user_id, user_id))
+      .all();
+  },
+
+  async getWebauthnCredentialByCredentialId(args) {
+    const { credential_id } = args as { credential_id: string };
+    return orm.query.webauthn_credentials.findFirst({
+      where: (c, { eq }) => eq(c.credential_id, credential_id),
+    });
+  },
+
+  async insertWebauthnCredential(args) {
+    const val = args as typeof schema.webauthn_credentials.$inferInsert;
+    return orm.insert(schema.webauthn_credentials).values(val).returning().get();
+  },
+
+  async updateWebauthnCounter(args) {
+    const { credential_id, counter } = args as { credential_id: string; counter: number };
+    return orm.update(schema.webauthn_credentials)
+      .set({ counter })
+      .where(eq(schema.webauthn_credentials.credential_id, credential_id))
+      .returning()
+      .get();
+  },
+
+  async deleteWebauthnCredential(args) {
+    const { id, user_id } = args as { id: string; user_id: string };
+    return orm.delete(schema.webauthn_credentials)
+      .where(and(
+        eq(schema.webauthn_credentials.id, id),
+        eq(schema.webauthn_credentials.user_id, user_id),
+      ))
+      .returning()
+      .get();
+  },
+
+  // Login sessions
+  async insertLoginSession(args) {
+    const val = args as typeof schema.login_sessions.$inferInsert;
+    return orm.insert(schema.login_sessions).values(val).returning().get();
+  },
+
+  async getLoginSession(args) {
+    const { id } = args as { id: string };
+    return orm.query.login_sessions.findFirst({ where: (s, { eq }) => eq(s.id, id) });
+  },
+
+  async deleteLoginSession(args) {
+    const { id } = args as { id: string };
+    return orm.delete(schema.login_sessions)
+      .where(eq(schema.login_sessions.id, id))
+      .returning()
+      .get();
+  },
+
+  async deleteExpiredLoginSessions(args) {
+    // expires_at is always written by the auth service in ISO-8601 (UTC) form,
+    // so a lexicographic comparison against another ISO string is chronological.
+    const { now } = args as { now: string };
+    return orm.delete(schema.login_sessions)
+      .where(lt(schema.login_sessions.expires_at, now))
+      .returning()
+      .all();
   },
 
   // Raw query escape hatch for migrations / admin

@@ -324,8 +324,10 @@ describe('M0 验收 3 — 错误码一致性', () => {
 
 describe('M0 验收 4 — schema 注解完整性', () => {
   it('output schema has x-sensitivity on all annotated fields', () => {
-    const output = BASE_CAP.output as Record<string, Record<string, unknown>>
-    for (const [field, schema] of Object.entries(output.properties as Record<string, Record<string, unknown>>)) {
+    const output = BASE_CAP.output as unknown as {
+      properties: Record<string, Record<string, unknown>>
+    }
+    for (const [field, schema] of Object.entries(output.properties)) {
       expect(schema['x-sensitivity'], `field ${field} missing x-sensitivity`).toBeDefined()
     }
   })
