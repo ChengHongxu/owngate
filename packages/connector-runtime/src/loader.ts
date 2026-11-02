@@ -2,76 +2,467 @@
 // Parses a YAML connector manifest, validates it, and compiles it into
 // Capability objects ready for the runtime.
 
-import { readFileSync } from 'node:fs'
-import { parse as parseYaml } from 'yaml'
-import { isKnownTransform } from './transforms.js'
-import type { Capability, JSONSchema, Transport } from '@webridge/core'
+import { readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
+import { isKnownTransform } from './transforms.js';
+import type { Capability, JSONSchema, Transport } from '@webridge/core';
 
 // ── Public types ───────────────────────────────────────────────────────────
 
 export interface CompiledConnector {
-  id: string
-  version: string
-  title: string
-  transport: Transport
-  capabilities: Record<string, Capability>
+  id: string;
+  version: string;
+  title: string;
+  transport: Transport;
+  capabilities: Record<string, Capability>;
 }
 
-// ── Internal manifest types ────────────────────────────────────────────────
+// ── Internal manifest shapes ───────────────────────────────────────────────
 
-type AccessKind = 'official_api' | 'private_api' | 'browser'
-
-type SensitivityKind = 'pii' | 'financial' | 'content'
+type AccessKind = 'official_api' | 'private_api' | 'browser';
+type SensitivityKind = 'pii' | 'financial' | 'content';
 
 interface OutputFieldDef {
-  from: string
-  transform?: string
-  unit?: string
-  scope?: string
-  sensitivity?: SensitivityKind
+  from: string;
+  transform?: string;
+  unit?: string;
+  scope?: string;
+  sensitivity?: SensitivityKind;
 }
 
 interface CapabilityDef {
-  id: string
-  kind: 'query' | 'action'
-  effect: string
-  approval?: string
-  cache: { ttl: number } | null
-  title: string
-  description: string
-  request: { method: string; path: string }
-  success_when?: string
-  auth_failed_when?: string
-  output?: Record<string, OutputFieldDef>
+  id: string;
+  kind: 'query' | 'action';
+  effect: string;
+  approval?: string;
+  cache: { ttl: number } | null;
+  title: string;
+  description: string;
+  request: { method: string; path: string };
+  success_when?: string;
+  auth_failed_when?: string;
+  output?: Record<string, OutputFieldDef>;
+  data_time?: { now: true };
 }
 
 interface ManifestRaw {
-  connector: string
-  version: string
-  title: string
-  access: AccessKind
-  config?: Record<string, unknown>
-  auth?: { type: string; fields?: Record<string, unknown> }
+  connector: string;
+  version: string;
+  title: string;
+  access: AccessKind;
+  config?: Record<string, unknown>;
+  auth?: { type: string; fields?: Record<string, unknown> };
   http?: {
-    base: string
-    headers?: Record<string, string>
-    rate_limit?: { rpm: number }
-    timeout_ms?: number
-  }
-  capabilities: CapabilityDef[]
+    base: string;
+    headers?: Record<string, string>;
+    rate_limit?: { rpm: number };
+    timeout_ms?: number;
+  };
+  capabilities: CapabilityDef[];
 }
 
-// ── Validation helpers ─────────────────────────────────────────────────────
+// ── Validation constants ───────────────────────────────────────────────────
 
-const ACCESS_KINDS: ReadonlySet<string> = new Set(['official_api', 'private_api', 'browser'])
-const EFFECT_VALUES: ReadonlySet<string> = new Set(['read', 'write', 'destructive', 'external_send', 'financial'])
-const KIND_VALUES: ReadonlySet<string> = new Set(['query', 'action'])
-const SENSITIVITY_VALUES: ReadonlySet<string> = new Set(['pii', 'financial', 'content'])
+const ACCESS_KINDS = new Set<string>(['official_api', 'private_api', 'browser']);
+const EFFECT_VALUES = new Set<string>(['read', 'write', 'destructive', 'external_send', 'financial']);
+const KIND_VALUES = new Set<string>(['query', 'action']);
+const SENSITIVITY_VALUES = new Set<string>(['pii', 'financial', 'content']);
+
+const APPROVAL_BY_KIND: Record<'query' | 'action', string> = {
+  query: 'never',
+  action: 'always',
+};
+
+function transportForAccess(access: AccessKind): Transport {
+  return access === 'browser' ? 'browser' : 'http';
+}
+
+// ── Field-level validation helpers ──────────────────────────────────────────
+
+function asObject(v: unknown, ctx: string): Record<string, unknown> {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+    throw new Error(`${ctx}: expected an object, got ${JSON.stringify(v)}`);
+  }
+  return v as Record<string, unknown>;
+}
+
+function asRecord(v: unknown, ctx: string): Record<string, unknown> {
+  const obj = asObject(v, ctx);
+  for (const key of Object.keys(obj)) {
+    const field = obj[key];
+    if (field === null || typeof field !== 'object' || Array.isArray(field)) {
+      throw new Error(`${ctx}: field "${key}" must be an object, got ${JSON.stringify(field)}`);
+    }
+  }
+  return obj;
+}
 
 function requireString(obj: Record<string, unknown>, key: string, ctx: string): string {
-  const v = obj[key]
+  const v = obj[key];
   if (typeof v !== 'string' || v.length === 0) {
-    throw new Error(`${ctx}: "${key}" must be a non-empty string, got ${JSON.stringify(v)}`)
+    throw new Error(`${ctx}: "${key}" must be a non-empty string, got ${JSON.stringify(v)}`);
   }
-  return v
+  return v;
+}
+
+function requireEnum(
+  obj: Record<string, unknown>,
+  key: string,
+  allowed: ReadonlySet<string>,
+  ctx: string,
+): string {
+  const v = obj[key];
+  if (typeof v !== 'string' || !allowed.has(v)) {
+    throw new Error(
+      `${ctx}: "${key}" must be one of ${[...allowed].join(' | ')}, got ${JSON.stringify(v)}`,
+    );
+  }
+  return v;
+}
+
+// ── Output field compilation ───────────────────────────────────────────────
+
+function compileOutputSchema(
+  defs: Record<string, OutputFieldDef> | undefined,
+  capId: string,
+): JSONSchema {
+  if (!defs || Object.keys(defs).length === 0) {
+    return {};
+  }
+
+  const properties: Record<string, JSONSchema> = {};
+  const required: string[] = [];
+  for (const [name, def] of Object.entries(defs)) {
+    if (typeof def.from !== 'string' || def.from.length === 0) {
+      throw new Error(
+        `capability "${capId}" output field "${name}": "from" must be a non-empty JSONPath string`,
+      );
+    }
+    if (def.transform !== undefined) {
+      if (typeof def.transform !== 'string' || def.transform.length === 0) {
+        throw new Error(
+          `capability "${capId}" output field "${name}": "transform" must be a string`,
+        );
+      }
+      if (!isKnownTransform(def.transform)) {
+        throw new Error(
+          `capability "${capId}" output field "${name}": unknown transform "${def.transform}"`,
+        );
+      }
+    }
+    if (def.sensitivity !== undefined && !SENSITIVITY_VALUES.has(def.sensitivity)) {
+      throw new Error(
+        `capability "${capId}" output field "${name}": "sensitivity" must be one of ${[...SENSITIVITY_VALUES].join(' | ')}, got ${JSON.stringify(def.sensitivity)}`,
+      );
+    }
+
+    const prop: JSONSchema = {
+      type: 'string',
+      'x-from': def.from,
+    };
+    if (def.transform !== undefined) prop['x-transform'] = def.transform;
+    if (def.unit !== undefined) prop['x-unit'] = def.unit;
+    if (def.scope !== undefined) prop['x-scope'] = def.scope;
+    if (def.sensitivity !== undefined) prop['x-sensitivity'] = def.sensitivity;
+    properties[name] = prop;
+    required.push(name);
+  }
+
+  return {
+    type: 'object',
+    properties,
+    required,
+    additionalProperties: false,
+  };
+}
+
+// ── Capability compilation ──────────────────────────────────────────────────
+
+function compileCapability(def: CapabilityDef, transport: Transport): Capability {
+  const id = def.id;
+  const kind = def.kind;
+  const effect = def.effect;
+
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new Error('capability "id" must be a non-empty string');
+  }
+  if (!KIND_VALUES.has(kind)) {
+    throw new Error(
+      `capability "${id}": "kind" must be one of ${[...KIND_VALUES].join(' | ')}, got ${JSON.stringify(kind)}`,
+    );
+  }
+  if (!EFFECT_VALUES.has(effect)) {
+    throw new Error(
+      `capability "${id}": "effect" must be one of ${[...EFFECT_VALUES].join(' | ')}, got ${JSON.stringify(effect)}`,
+    );
+  }
+
+  // cache: query → {ttl} allowed or null; action → must be null
+  if (kind === 'action' && def.cache !== null) {
+    throw new Error(`capability "${id}": "cache" must be null for actions`);
+  }
+  let cache: { ttl: number } | null = null;
+  if (def.cache !== null) {
+    const ttl = def.cache.ttl;
+    if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl <= 0) {
+      throw new Error(`capability "${id}": "cache.ttl" must be a positive number`);
+    }
+    cache = { ttl };
+  }
+
+  const approval = def.approval ?? APPROVAL_BY_KIND[kind];
+  if (approval !== 'never' && approval !== 'always' && approval !== 'policy') {
+    throw new Error(
+      `capability "${id}": "approval" must be one of never | always | policy, got ${JSON.stringify(approval)}`,
+    );
+  }
+
+  if (typeof def.title !== 'string' || def.title.length === 0) {
+    throw new Error(`capability "${id}": "title" must be a non-empty string`);
+  }
+  if (typeof def.description !== 'string') {
+    throw new Error(`capability "${id}": "description" must be a string`);
+  }
+
+  const req = def.request;
+  if (req === null || typeof req !== 'object' || Array.isArray(req)) {
+    throw new Error(`capability "${id}": "request" must be an object`);
+  }
+  if (typeof req.method !== 'string' || req.method.length === 0) {
+    throw new Error(`capability "${id}": "request.method" must be a non-empty string`);
+  }
+  if (typeof req.path !== 'string' || req.path.length === 0) {
+    throw new Error(`capability "${id}": "request.path" must be a non-empty string`);
+  }
+
+  const outputSchema = compileOutputSchema(def.output, id);
+
+  return {
+    id,
+    kind,
+    title: def.title,
+    description: def.description,
+    effect: effect as Capability['effect'],
+    approval: approval as Capability['approval'],
+    input: { type: 'object' } as JSONSchema,
+    output: outputSchema,
+    cache,
+    long_running: false,
+    cancel: 'none',
+    idempotency: 'none',
+    verify: null,
+    transport,
+    support: { status: 'supported' },
+  };
+}
+
+// ── Manifest validation & compilation ──────────────────────────────────────
+
+function validateManifest(raw: unknown): ManifestRaw {
+  const root = asObject(raw, 'manifest');
+  const connector = requireString(root, 'connector', 'manifest');
+  const version = requireString(root, 'version', 'manifest');
+  const title = requireString(root, 'title', 'manifest');
+  const access = requireEnum(root, 'access', ACCESS_KINDS, 'manifest') as AccessKind;
+
+  let config: Record<string, unknown> | undefined;
+  if (root["config"] !== undefined) {
+    config = asRecord(root["config"], 'manifest.config');
+  }
+
+  let auth: ManifestRaw['auth'];
+  if (root["auth"] !== undefined) {
+    const authObj = asObject(root["auth"], 'manifest.auth');
+    const authType = requireString(authObj, 'type', 'manifest.auth');
+    auth = { type: authType };
+    if (authObj["fields"] !== undefined) {
+      auth.fields = asRecord(authObj["fields"], 'manifest.auth.fields') as Record<string, unknown>;
+    }
+  }
+
+  let http: ManifestRaw['http'];
+  if (root["http"] !== undefined) {
+    const httpObj = asObject(root["http"], 'manifest.http');
+    http = {
+      base: requireString(httpObj, 'base', 'manifest.http'),
+    };
+    if (httpObj["headers"] !== undefined) {
+      // Headers are string values (templates), not nested objects — validate accordingly.
+      const hdrsObj = asObject(httpObj["headers"], 'manifest.http.headers');
+      const headers: Record<string, string> = {};
+      for (const k of Object.keys(hdrsObj)) {
+        const hv = hdrsObj[k];
+        if (typeof hv !== 'string') {
+          throw new Error(`manifest.http.headers: header "${k}" must be a string, got ${JSON.stringify(hv)}`);
+        }
+        headers[k] = hv;
+      }
+      http["headers"] = headers;
+    }
+    if (httpObj["rate_limit"] !== undefined) {
+      const rl = asObject(httpObj["rate_limit"], 'manifest.http["rate_limit"]');
+      const rpm = rl["rpm"];
+      if (typeof rpm !== 'number' || !Number.isFinite(rpm) || rpm <= 0) {
+        throw new Error('manifest.http["rate_limit"].rpm must be a positive number');
+      }
+      http["rate_limit"] = { rpm };
+    }
+    if (httpObj["timeout_ms"] !== undefined) {
+      if (typeof httpObj["timeout_ms"] !== 'number' || httpObj["timeout_ms"] <= 0) {
+        throw new Error('manifest.http["timeout_ms"] must be a positive number');
+      }
+      http["timeout_ms"] = httpObj["timeout_ms"];
+    }
+  }
+
+  if (!Array.isArray(root["capabilities"]) || root["capabilities"].length === 0) {
+    throw new Error('manifest.capabilities must be a non-empty array');
+  }
+
+  const capabilities: CapabilityDef[] = [];
+  const seenIds = new Set<string>();
+  for (let i = 0; i < root["capabilities"].length; i++) {
+    const capRaw = asObject(root["capabilities"][i], `manifest.capabilities[${i}]`);
+    const capId = requireString(capRaw, 'id', `manifest.capabilities[${i}]`);
+    if (seenIds.has(capId)) {
+      throw new Error(`manifest.capabilities[${i}]: duplicate capability id "${capId}"`);
+    }
+    seenIds.add(capId);
+
+    const kind = requireEnum(capRaw, 'kind', KIND_VALUES, `manifest.capabilities[${i}]`) as
+      | 'query'
+      | 'action';
+    const effect = requireEnum(
+      capRaw,
+      'effect',
+      EFFECT_VALUES,
+      `manifest.capabilities[${i}]`,
+    );
+
+    // cache: null or { ttl: number }; undefined treated as null.
+    let cache: { ttl: number } | null = null;
+    if (capRaw["cache"] === null || capRaw["cache"] === undefined) {
+      cache = null;
+    } else {
+      const cacheObj = asObject(capRaw["cache"], `manifest.capabilities[${i}].cache`);
+      const ttl = cacheObj["ttl"];
+      if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl <= 0) {
+        throw new Error(`manifest.capabilities[${i}].cache.ttl must be a positive number`);
+      }
+      cache = { ttl };
+    }
+
+    const capTitle = requireString(capRaw, 'title', `manifest.capabilities[${i}]`);
+    if (capRaw["description"] !== undefined && typeof capRaw["description"] !== 'string') {
+      throw new Error(`manifest.capabilities[${i}].description must be a string`);
+    }
+    const capDesc = typeof capRaw["description"] === 'string' ? capRaw["description"] : '';
+
+    const requestObj = asObject(capRaw["request"], `manifest.capabilities[${i}].request`);
+    const method = requireString(requestObj, 'method', `manifest.capabilities[${i}].request`);
+    const path = requireString(requestObj, 'path', `manifest.capabilities[${i}].request`);
+
+    // output fields
+    let output: Record<string, OutputFieldDef> | undefined;
+    if (capRaw["output"] !== undefined) {
+      const outObj = asRecord(capRaw["output"], `manifest.capabilities[${i}].output`);
+      output = {};
+      for (const [name, fieldRaw] of Object.entries(outObj)) {
+        const fieldObj = asObject(fieldRaw, `manifest.capabilities[${i}].output.${name}`);
+        const from = requireString(
+          fieldObj,
+          'from',
+          `manifest.capabilities[${i}].output.${name}`,
+        );
+        const def: OutputFieldDef = { from };
+        if (fieldObj["transform"] !== undefined) {
+          if (typeof fieldObj["transform"] !== 'string' || fieldObj["transform"].length === 0) {
+            throw new Error(
+              `manifest.capabilities[${i}].output.${name}.transform must be a string`,
+            );
+          }
+          def.transform = fieldObj["transform"];
+        }
+        if (fieldObj["unit"] !== undefined) {
+          if (typeof fieldObj["unit"] !== 'string') {
+            throw new Error(
+              `manifest.capabilities[${i}].output.${name}.unit must be a string`,
+            );
+          }
+          def.unit = fieldObj["unit"];
+        }
+        if (fieldObj["scope"] !== undefined) {
+          if (typeof fieldObj["scope"] !== 'string') {
+            throw new Error(
+              `manifest.capabilities[${i}].output.${name}.scope must be a string`,
+            );
+          }
+          def.scope = fieldObj["scope"];
+        }
+        if (fieldObj["sensitivity"] !== undefined) {
+          if (
+            typeof fieldObj["sensitivity"] !== 'string' ||
+            !SENSITIVITY_VALUES.has(fieldObj["sensitivity"])
+          ) {
+            throw new Error(
+              `manifest.capabilities[${i}].output.${name}.sensitivity must be one of ${[...SENSITIVITY_VALUES].join(' | ')}`,
+            );
+          }
+          def.sensitivity = fieldObj["sensitivity"] as SensitivityKind;
+        }
+        output[name] = def;
+      }
+    }
+
+    const capDef: CapabilityDef = {
+      id: capId,
+      kind,
+      effect,
+      cache,
+      title: capTitle,
+      description: capDesc,
+      request: { method, path },
+      ...(output !== undefined ? { output } : {}),
+    };
+    if (typeof capRaw['approval'] === 'string') capDef.approval = capRaw['approval'];
+    if (typeof capRaw["success_when"] === 'string') capDef.success_when = capRaw["success_when"];
+    if (typeof capRaw["auth_failed_when"] === 'string') capDef.auth_failed_when = capRaw["auth_failed_when"];
+    if (capRaw["data_time"] !== undefined) capDef.data_time = capRaw["data_time"] as { now: true };
+    capabilities.push(capDef);
+  }
+
+  return {
+    connector,
+    version,
+    title,
+    access,
+    ...(config !== undefined ? { config } : {}),
+    ...(auth !== undefined ? { auth } : {}),
+    ...(http !== undefined ? { http } : {}),
+    capabilities,
+  };
+}
+
+export function loadManifest(yamlString: string): CompiledConnector {
+  const raw = parseYaml(yamlString);
+  const manifest = validateManifest(raw);
+
+  const transport = transportForAccess(manifest.access);
+  const capabilities: Record<string, Capability> = {};
+  for (const def of manifest.capabilities) {
+    capabilities[def.id] = compileCapability(def, transport);
+  }
+
+  return {
+    id: manifest.connector,
+    version: manifest.version,
+    title: manifest.title,
+    transport,
+    capabilities,
+  };
+}
+
+export function loadManifestFile(path: string): CompiledConnector {
+  const contents = readFileSync(path, 'utf8');
+  return loadManifest(contents);
 }

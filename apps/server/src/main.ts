@@ -3,6 +3,7 @@
 
 import Fastify from 'fastify';
 import { randomBytes, createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { DbClient } from '@webridge/db';
 import { Vault } from '@webridge/vault';
 import { redact } from '@webridge/vault';
@@ -23,11 +24,25 @@ import { registerAdminRoutes } from './routes/admin.js';
 
 const PORT = parseInt(process.env['PORT'] ?? '3000', 10);
 const DB_PATH = process.env['DB_PATH'] ?? './webridge.db';
-const MASTER_KEY = process.env['MASTER_KEY_HEX'] ?? (() => {
+const LOG_LEVEL = process.env['LOG_LEVEL'] ?? 'info';
+
+// Master key resolution: env var → file path env var → ephemeral (dev only)
+function resolveMasterKey(): string {
+  if (process.env['MASTER_KEY_HEX']) return process.env['MASTER_KEY_HEX'];
+  const keyFile = process.env['MASTER_KEY_HEX_FILE'];
+  if (keyFile) {
+    try {
+      return readFileSync(keyFile, 'utf8').trim();
+    } catch (e) {
+      console.error(`[FATAL] Cannot read MASTER_KEY_HEX_FILE at ${keyFile}:`, (e as Error).message);
+      process.exit(1);
+    }
+  }
   console.warn('[WARN] MASTER_KEY_HEX not set — using ephemeral key. Data will be lost on restart.');
   return randomBytes(32).toString('hex');
-})();
-const LOG_LEVEL = process.env['LOG_LEVEL'] ?? 'info';
+}
+
+const MASTER_KEY = resolveMasterKey();
 
 export async function buildServer() {
   const db = new DbClient(DB_PATH);

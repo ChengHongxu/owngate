@@ -1,0 +1,76 @@
+# webridge Docker Compose 部署
+# 设计依据：设计方案.md §12.2
+# 注意：TLS 由外部 nginx 终止，server 容器只暴露 HTTP。
+# 生成 master_key：node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+name: webridge
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+    image: webridge/server
+    ports:
+      - "${PORT:-3000}:3000"          # nginx 反代到此端口，TLS 由 nginx 处理
+    volumes:
+      - server-data:/data
+    secrets:
+      - master_key
+    networks:
+      - internal
+      - lan_egress
+    read_only: true
+    user: "1000:1000"
+    env_file:
+      - path: .env
+        required: false           # 文件由用户按 README 步骤创建，不纳入版本控制
+    environment:
+      # 从 Docker secret 读取主密钥，覆盖 .env 中的占位
+      MASTER_KEY_HEX_FILE: /run/secrets/master_key
+    restart: unless-stopped
+
+  browser:
+    build:
+      context: ..
+      dockerfile: apps/browser/Dockerfile
+    image: webridge/browser              # Playwright 官方镜像 + Xvfb
+    volumes:
+      - browser-profiles:/profiles
+    networks:
+      - internal                         # 无直接出网路由
+    read_only: true
+    tmpfs:
+      - /tmp
+    shm_size: "1gb"
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN                        # Chromium 沙箱所需，见设计 §12.2
+    mem_limit: 8g
+    restart: unless-stopped
+
+  egress:
+    # M0 占位：M1 实现真正的按连接出网代理
+    image: alpine:3.20
+    command: ["sleep", "infinity"]
+    networks:
+      - internal
+      - wan_egress
+    restart: unless-stopped
+
+secrets:
+  master_key:
+    file: ./secrets/master_key
+
+networks:
+  internal:
+    internal: true                       # 仅内部互通，无外网出口
+  lan_egress: {}                         # server 访问局域网 API 及公网 API
+  wan_egress: {}                         # egress 代理出网
+
+volumes:
+  server-data: {}
+  browser-profiles: {}

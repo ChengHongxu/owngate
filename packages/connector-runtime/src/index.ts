@@ -6,3 +6,5 @@ export { renderTemplate, renderObject } from './template.js';
 export type { TemplateContext } from './template.js';
 export { applyTransform, isKnownTransform } from './transforms.js';
 export type { TransformFn, TransformContext } from './transforms.js';
+export { loadManifest, loadManifestFile } from './loader.js';
+export type { CompiledConnector } from './loader.js';
