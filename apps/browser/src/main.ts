@@ -11,6 +11,7 @@ import { SessionManager } from './session.js'
 import { execCapability, type ExecResult } from './exec.js'
 import { validateImportedCookies } from './cookies.js'
 import { parseLoginCondition } from './login-state.js'
+import { readSecret } from './secrets.js'
 
 const PORT = parseInt(process.env['BROWSER_RPC_PORT'] ?? '4000', 10)
 const PROFILES_DIR = process.env['BROWSER_PROFILES_DIR'] ?? '/profiles'
@@ -39,7 +40,11 @@ function isNonEmptyString(v: unknown): v is string {
 
 export async function buildBrowserServer() {
   // Read the secret at build time, not module load: tests set it in beforeAll.
-  const rpcSecret = process.env['BROWSER_RPC_SECRET'] ?? ''
+  // An empty key would make every signature forgeable, so refuse to start.
+  const rpcSecret = readSecret('BROWSER_RPC_SECRET')
+  if (rpcSecret === undefined) {
+    throw new Error('BROWSER_RPC_SECRET or BROWSER_RPC_SECRET_FILE must be set')
+  }
   const sessionManager = new SessionManager(PROFILES_DIR, process.env['BROWSER_EGRESS_PROXY'])
   const checkCache = new Map<string, CheckCacheEntry>()
 

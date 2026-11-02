@@ -4,17 +4,36 @@
 import { createHmac, randomUUID } from 'node:crypto'
 import type { Connection, Capability, ResultEnvelope } from '@webridge/core'
 import { err, fail, ok } from '@webridge/core'
+import { readSecret } from '../secrets.js'
 
-const BROWSER_RPC_URL = process.env['BROWSER_RPC_URL'] ?? 'http://browser:4000'
-const BROWSER_RPC_SECRET = process.env['BROWSER_RPC_SECRET'] ?? ''
+const BROWSER_RPC_URL = (process.env['BROWSER_RPC_URL'] ?? 'http://browser:4000').replace(/\/$/, '')
 const DEFAULT_DEADLINE_MS = 30_000
 
 // ── HMAC signing ─────────────────────────────────────────────────────────
 
+// Resolved on first use so a server without a browser worker (tests, M0
+// setups) still starts; a missing key fails the call instead of signing with ''.
+function rpcSecret(): string {
+  const secret = readSecret('BROWSER_RPC_SECRET')
+  if (secret === undefined) {
+    throw new Error('BROWSER_RPC_SECRET or BROWSER_RPC_SECRET_FILE must be set to call the browser worker')
+  }
+  return secret
+}
+
+// POSTs sign the raw body; GETs (including the WebSocket upgrade) sign their
+// path + query exactly as sent. Must match apps/browser/src/auth.ts.
 function signBody(body: string): { 'X-Wr-Sig': string; 'X-Wr-Ts': string } {
   const ts = Date.now().toString()
-  const sig = createHmac('sha256', BROWSER_RPC_SECRET).update(body).digest('hex')
+  const sig = createHmac('sha256', rpcSecret()).update(body).digest('hex')
   return { 'X-Wr-Sig': sig, 'X-Wr-Ts': ts }
+}
+
+/** Opens the worker's signed screencast socket for one login stream token. */
+export function openScreencastUpstream(streamToken: string): WebSocket {
+  const path = '/v1/screencast?token=' + encodeURIComponent(streamToken)
+  // Node's global (undici) WebSocket accepts handshake headers.
+  return new WebSocket(BROWSER_RPC_URL + path, { headers: signBody(path) })
 }
 
 async function rpcPost<T>(path: string, payload: unknown): Promise<T> {

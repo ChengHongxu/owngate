@@ -22,7 +22,8 @@ export interface ScreenDeps {
   stopLogin: (connectionId: string) => Promise<{ ok: boolean }>;
   /** Append to audit_log */
   audit: (entry: { action: string; target?: string; detail?: unknown; client_id?: string }) => void;
-  browserRpcUrl: string;
+  /** Opens the HMAC-signed upstream socket: GET /v1/screencast?token=... */
+  openUpstream: (streamToken: string) => WebSocket;
 }
 
 export interface TicketEntry {
@@ -163,16 +164,11 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
           detail: { user_id: userId },
         });
 
-        const upstreamUrl =
-          deps.browserRpcUrl.replace(/\/$/, '') +
-          '/v1/screencast?token=' + encodeURIComponent(entry.streamToken);
-
-        // Node 22+ ships undici's WebSocket as a global — no `ws` dependency
-        // needed on this side (the `ws` instance below is the server socket
-        // handed over by @fastify/websocket).
+        // `client` is the @fastify/websocket server socket; `upstream` is the
+        // signed client socket to the browser worker.
         let upstream: WebSocket;
         try {
-          upstream = new WebSocket(upstreamUrl);
+          upstream = deps.openUpstream(entry.streamToken);
         } catch (e) {
           app.log.error({ err: (e as Error).message }, 'screencast upstream failed');
           client.close(1011, 'upstream unavailable');

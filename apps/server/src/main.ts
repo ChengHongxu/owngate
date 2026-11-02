@@ -23,7 +23,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerScreenRoutes } from './routes/screen.js';
 import { createAuthService } from './auth/service.js';
 import { SESSION_COOKIE } from './auth/guard.js';
-import { startLogin, stopLogin } from './dispatchers/browser.js';
+import { openScreencastUpstream, startLogin, stopLogin } from './dispatchers/browser.js';
 import { ConnectorRegistry } from './registry.js';
 import { UnifiedDispatcher } from './dispatchers/index.js';
 
@@ -191,7 +191,7 @@ export async function buildServer() {
     startLogin,
     stopLogin,
     audit: (entry) => auditStore.append({ client_id: entry.client_id, action: entry.action, target: entry.target, detail: entry.detail }),
-    browserRpcUrl: process.env['BROWSER_RPC_URL'] ?? 'http://browser:4000',
+    openUpstream: openScreencastUpstream,
   });
 
   // Admin web UI (built by apps/web). Served from the server so nginx only

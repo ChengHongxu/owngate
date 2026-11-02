@@ -33,7 +33,9 @@ function buildDeps(overrides: Partial<ScreenDeps> = {}) {
     audit: (entry: AuditEntry) => {
       audits.push(entry);
     },
-    browserRpcUrl: 'http://browser:4000',
+    openUpstream: (_streamToken: string): WebSocket => {
+      throw new Error('upgrade is not exercised by these HTTP-level tests');
+    },
     ...overrides,
   };
   return { deps, audits };

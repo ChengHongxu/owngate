@@ -17,6 +17,7 @@ services:
       - server-data:/data
     secrets:
       - master_key
+      - browser_rpc_secret
     networks:
       - internal
       - lan_egress
@@ -28,6 +29,9 @@ services:
     environment:
       # 从 Docker secret 读取主密钥，覆盖 .env 中的占位
       MASTER_KEY_HEX_FILE: /run/secrets/master_key
+      # server ↔ browser RPC 的 HMAC 密钥，与 browser 服务共用同一个 secret
+      BROWSER_RPC_SECRET_FILE: /run/secrets/browser_rpc_secret
+      BROWSER_RPC_URL: http://browser:4000
       # 容器内路径固定，覆盖 .env 中可能写成本机路径的值
       CONNECTORS_DIR: /app/connectors
       WEB_ROOT: /app/apps/web/dist
@@ -41,6 +45,15 @@ services:
     image: webridge/browser              # Playwright 官方镜像 + Xvfb
     volumes:
       - browser-profiles:/profiles
+    secrets:
+      - browser_rpc_secret
+    # 不读 .env：worker 只拿它需要的值，碰不到主密钥等 server 配置
+    environment:
+      BROWSER_RPC_SECRET_FILE: /run/secrets/browser_rpc_secret
+      BROWSER_RPC_PORT: "4000"
+      BROWSER_PROFILES_DIR: /profiles
+      BROWSER_EGRESS_PROXY: http://egress:3128   # 设计 §4.4.1：浏览器只能经 egress 出网
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
     networks:
       - internal                         # 无直接出网路由
     read_only: true
@@ -75,6 +88,8 @@ services:
 secrets:
   master_key:
     file: ./secrets/master_key
+  browser_rpc_secret:
+    file: ./secrets/browser_rpc_secret
 
 networks:
   internal:
