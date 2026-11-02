@@ -20,8 +20,14 @@ export {
   type ScreencastOptions,
 } from './screencast.js'
 export {
+  checkLoginOnce,
   waitForLogin,
   type LoginCheckConfig,
   type LoginCondition,
   type LoginResult,
 } from './login.js'
+export {
+  detectAuthFailure,
+  type AuthFailure,
+  type AuthFailureCode,
+} from './auth-detect.js'

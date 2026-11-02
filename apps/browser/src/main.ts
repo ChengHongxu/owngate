@@ -9,6 +9,8 @@ import { ScreencastSession } from '@webridge/browser-runtime'
 import { makeHmacPlugin } from './auth.js'
 import { SessionManager } from './session.js'
 import { execCapability, type ExecResult } from './exec.js'
+import { validateImportedCookies } from './cookies.js'
+import { parseLoginCondition } from './login-state.js'
 
 const PORT = parseInt(process.env['BROWSER_RPC_PORT'] ?? '4000', 10)
 const PROFILES_DIR = process.env['BROWSER_PROFILES_DIR'] ?? '/profiles'
@@ -20,6 +22,19 @@ const WS_OPEN = 1
 interface CheckCacheEntry {
   result: ExecResult
   expiresAt: number
+}
+
+function invalidInput(whatHappened: string) {
+  return {
+    code: 'INVALID_INPUT',
+    what_happened: whatHappened,
+    next_step: 'fix the request body',
+    retryable: false,
+  }
+}
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v.length > 0
 }
 
 export async function buildBrowserServer() {
@@ -34,7 +49,7 @@ export async function buildBrowserServer() {
 
   await app.register(fastifyWebsocket)
 
-  // HMAC auth on everything except GET /v1/health (no body to sign)
+  // HMAC auth on everything except GET /v1/health. Other GETs sign path + query.
   await app.register(makeHmacPlugin(rpcSecret))
 
   // ── Health ───────────────────────────────────────────────────────────────
@@ -77,13 +92,29 @@ export async function buildBrowserServer() {
       connection_id: string
       url: string
       qr_selector?: string
+      /** How long to wait for login, in ms. Default 15 min. */
       deadline_ms?: number
+      /** Condition that proves login; without it the wait can only time out. */
+      success_when?: unknown
     }
   }>('/v1/login/start', async (request, reply) => {
-    const { connection_id, url, qr_selector, deadline_ms } = request.body
+    const { connection_id, url, qr_selector, deadline_ms, success_when } = request.body
+    let successWhen
+    if (success_when !== undefined) {
+      const parsed = parseLoginCondition(success_when)
+      if (!parsed.ok) return reply.status(400).send(invalidInput(parsed.error))
+      successWhen = parsed.condition
+    }
+    if (deadline_ms !== undefined && !(Number.isFinite(deadline_ms) && deadline_ms > 0)) {
+      return reply.status(400).send(invalidInput('deadline_ms must be a positive number'))
+    }
     try {
       return reply.send(
-        await sessionManager.startLogin(connection_id, url, qr_selector, deadline_ms),
+        await sessionManager.startLogin(connection_id, url, {
+          ...(qr_selector !== undefined ? { qrSelector: qr_selector } : {}),
+          ...(deadline_ms !== undefined ? { deadlineMs: deadline_ms } : {}),
+          ...(successWhen !== undefined ? { successWhen } : {}),
+        }),
       )
     } catch (e) {
       return reply.status(500).send({
@@ -99,6 +130,63 @@ export async function buildBrowserServer() {
   app.post<{ Body: { connection_id: string } }>('/v1/login/stop', async (request, reply) => {
     await sessionManager.stopLogin(request.body.connection_id)
     return reply.send({ ok: true })
+  })
+
+  // ── GET /v1/login/status ──────────────────────────────────────────────────
+  // Signed: the HMAC covers the path + query (see auth.ts for why).
+  app.get<{ Querystring: { connection_id?: string } }>(
+    '/v1/login/status',
+    async (request, reply) => {
+      const connectionId = request.query.connection_id
+      if (!isNonEmptyString(connectionId)) {
+        return reply.status(400).send(invalidInput('connection_id query parameter is required'))
+      }
+      return reply.send(sessionManager.getLoginState(connectionId))
+    },
+  )
+
+  // ── POST /v1/cookies/import ───────────────────────────────────────────────
+  // Responses and errors never echo cookie values, only names and domains.
+  app.post<{
+    Body: { connection_id?: unknown; cookies?: unknown; success_when?: unknown }
+  }>('/v1/cookies/import', async (request, reply) => {
+    const body = (request.body ?? {}) as {
+      connection_id?: unknown
+      cookies?: unknown
+      success_when?: unknown
+    }
+    if (!isNonEmptyString(body.connection_id)) {
+      return reply.status(400).send(invalidInput('connection_id is required'))
+    }
+    const validated = validateImportedCookies(body.cookies)
+    if (!validated.ok) return reply.status(400).send(invalidInput(validated.error))
+
+    let successWhen
+    if (body.success_when !== undefined) {
+      const parsed = parseLoginCondition(body.success_when)
+      if (!parsed.ok) return reply.status(400).send(invalidInput(parsed.error))
+      successWhen = parsed.condition
+    }
+
+    try {
+      const result = await sessionManager.importCookies(
+        body.connection_id,
+        validated.cookies,
+        successWhen,
+      )
+      return reply.send({
+        ...result,
+        cookies: validated.cookies.map((c) => ({ name: c.name, domain: c.domain })),
+      })
+    } catch {
+      // Deliberately drop the browser's error text: it could quote a cookie.
+      return reply.status(500).send({
+        code: 'COOKIE_IMPORT_FAILED',
+        what_happened: 'the browser rejected the cookie batch',
+        next_step: 'check cookie domains and paths, then retry',
+        retryable: false,
+      })
+    }
   })
 
   // ── POST /v1/check (idempotent) ──────────────────────────────────────────
