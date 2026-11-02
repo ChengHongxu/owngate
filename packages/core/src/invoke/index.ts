@@ -73,12 +73,10 @@ export interface InvokeServices {
 // ── Request & response types ──────────────────────────────────────────────
 
 export interface InvokeRequest {
-  /** The client's raw bearer token (will be hashed for lookup) */
   token: string;
   connection_id: string;
   capability_id: string;
   input: unknown;
-  /** Skip cache — forces a fresh fetch */
   no_cache?: boolean;
 }
 

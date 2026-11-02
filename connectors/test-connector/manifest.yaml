@@ -1,0 +1,55 @@
+connector: test-connector
+version: 1.0.0
+title: Test Connector (M0 打通用)
+access: official_api
+description: |
+  仅用于 M0 验收测试——打通 CLI/MCP/后台三入口的端到端路径。
+  不对应任何真实站点。
+
+config:
+  base_url: { type: string, format: uri, label: 站点网址, default: "https://httpbin.org" }
+
+auth:
+  type: bearer
+  fields:
+    access_token: { secret: true, label: 测试令牌, help: 任意字符串即可 }
+
+http:
+  base: "{{config.base_url}}"
+  headers:
+    Authorization: "Bearer {{secret.access_token}}"
+  rate_limit: { rpm: 60 }
+  timeout_ms: 10000
+
+capabilities:
+  - id: echo.ping
+    kind: query
+    effect: read
+    cache: { ttl: 30 }
+    title: Ping
+    description: 返回一个固定的 ping 响应，用于验证连接和 invoke() 路径。
+    request:
+      method: GET
+      path: /get
+    success_when: "status == 200"
+    auth_failed_when: "status in [401, 403]"
+    output:
+      message:
+        from: "$.url"
+        sensitivity: content
+
+  - id: echo.status
+    kind: query
+    effect: read
+    cache: null
+    title: 连接状态
+    description: 返回连接的当前支持状态，用于验证能力探测流程。
+    request:
+      method: GET
+      path: /get
+    success_when: "status == 200"
+    output:
+      ok:
+        from: "$.url"
+        transform: number_or_null
+        sensitivity: content

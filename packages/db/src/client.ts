@@ -136,7 +136,7 @@ export class DbClient {
   }
 
   // ── Audit log ──────────────────────────────────────────────
-  appendAuditLog(args: { action: string; client_id?: string; target?: string; detail?: unknown; prev_hash: string; entry_hash: string }) {
+  appendAuditLog(args: { action: string; client_id?: string | undefined; target?: string | undefined; detail?: unknown; prev_hash: string; entry_hash: string }) {
     return this.call('appendAuditLog', args);
   }
   getLastAuditEntry() {
