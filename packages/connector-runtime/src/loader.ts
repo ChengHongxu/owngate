@@ -9,12 +9,27 @@ import type { Capability, JSONSchema, Transport } from '@webridge/core';
 
 // ── Public types ───────────────────────────────────────────────────────────
 
+/** Login success condition — design doc §4.4.3 (`login.success_when.any[0]`). */
+export type LoginCondition =
+  | { type: 'cookie'; name: string; domain: string }
+  | { type: 'url_not_contains'; pattern: string };
+
+/** Remote-login settings from the manifest `login:` block — design doc §4.4.3. */
+export interface LoginConfig {
+  url: string;
+  successWhen: LoginCondition;
+  whoami?: string;
+  allowedDomains?: string[];
+  qrSelector?: string;
+}
+
 export interface CompiledConnector {
   id: string;
   version: string;
   title: string;
   transport: Transport;
   capabilities: Record<string, Capability>;
+  login?: LoginConfig;
 }
 
 // ── Internal manifest shapes ───────────────────────────────────────────────
@@ -59,6 +74,7 @@ interface ManifestRaw {
     timeout_ms?: number;
   };
   capabilities: CapabilityDef[];
+  login?: LoginConfig;
 }
 
 // ── Validation constants ───────────────────────────────────────────────────
@@ -256,6 +272,108 @@ function compileCapability(def: CapabilityDef, transport: Transport): Capability
   };
 }
 
+// ── Login block (§4.4.3) ───────────────────────────────────────────────────
+
+function optionalString(v: unknown, path: string): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== 'string' || v.length === 0) {
+    throw new Error(`${path} must be a non-empty string, got ${JSON.stringify(v)}`);
+  }
+  return v;
+}
+
+function parseLoginCondition(v: unknown, path: string): LoginCondition {
+  const obj = asObject(v, path);
+  const keys = Object.keys(obj);
+  if (keys.length !== 1) {
+    throw new Error(
+      `${path} must have exactly one condition key (cookie | url_not_contains), got ${JSON.stringify(keys)}`,
+    );
+  }
+  const key = keys[0];
+  if (key === 'cookie') {
+    const cookie = asObject(obj['cookie'], `${path}.cookie`);
+    const name = cookie['name'];
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new Error(`${path}.cookie.name must be a non-empty string, got ${JSON.stringify(name)}`);
+    }
+    const domain = cookie['domain'];
+    if (typeof domain !== 'string' || domain.length === 0) {
+      throw new Error(`${path}.cookie.domain must be a non-empty string, got ${JSON.stringify(domain)}`);
+    }
+    return { type: 'cookie', name, domain };
+  }
+  if (key === 'url_not_contains') {
+    const pattern = obj['url_not_contains'];
+    if (typeof pattern !== 'string' || pattern.length === 0) {
+      throw new Error(`${path}.url_not_contains must be a non-empty string, got ${JSON.stringify(pattern)}`);
+    }
+    return { type: 'url_not_contains', pattern };
+  }
+  throw new Error(`${path}: unknown condition type "${key}" (expected cookie | url_not_contains)`);
+}
+
+function parseLogin(v: unknown, rootQrSelector: unknown): LoginConfig {
+  const login = asObject(v, 'manifest.login');
+
+  const url = login['url'];
+  if (typeof url !== 'string' || url.length === 0) {
+    throw new Error(`manifest.login.url must be a non-empty string, got ${JSON.stringify(url)}`);
+  }
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    throw new Error(`manifest.login.url must be an absolute URL, got ${JSON.stringify(url)}`);
+  }
+  if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
+    throw new Error(`manifest.login.url must use http or https, got ${JSON.stringify(url)}`);
+  }
+
+  const sw = asObject(login['success_when'], 'manifest.login.success_when');
+  for (const key of Object.keys(sw)) {
+    if (key !== 'any') {
+      throw new Error(`manifest.login.success_when: unsupported key "${key}" (expected any)`);
+    }
+  }
+  const any = sw['any'];
+  if (!Array.isArray(any) || any.length === 0) {
+    throw new Error('manifest.login.success_when.any must be a non-empty array');
+  }
+  // Validate every entry so typos surface at load time; only the first is used (M1).
+  const conditions = any.map((c, i) => parseLoginCondition(c, `manifest.login.success_when.any[${i}]`));
+  const successWhen = conditions[0] as LoginCondition;
+
+  const whoami = optionalString(login['whoami'], 'manifest.login.whoami');
+
+  let allowedDomains: string[] | undefined;
+  if (login['allowed_domains'] !== undefined) {
+    const ad = login['allowed_domains'];
+    if (!Array.isArray(ad)) {
+      throw new Error(`manifest.login.allowed_domains must be an array of strings, got ${JSON.stringify(ad)}`);
+    }
+    allowedDomains = ad.map((d, i) => {
+      if (typeof d !== 'string' || d.length === 0) {
+        throw new Error(`manifest.login.allowed_domains[${i}] must be a non-empty string, got ${JSON.stringify(d)}`);
+      }
+      return d;
+    });
+  }
+
+  // qr_selector may sit inside login or at manifest top level; login wins.
+  const loginQr = optionalString(login['qr_selector'], 'manifest.login.qr_selector');
+  const topQr = optionalString(rootQrSelector, 'manifest.qr_selector');
+  const qrSelector = loginQr ?? topQr;
+
+  return {
+    url,
+    successWhen,
+    ...(whoami !== undefined ? { whoami } : {}),
+    ...(allowedDomains !== undefined ? { allowedDomains } : {}),
+    ...(qrSelector !== undefined ? { qrSelector } : {}),
+  };
+}
+
 // ── Manifest validation & compilation ──────────────────────────────────────
 
 function validateManifest(raw: unknown): ManifestRaw {
@@ -431,6 +549,8 @@ function validateManifest(raw: unknown): ManifestRaw {
     capabilities.push(capDef);
   }
 
+  const login = root['login'] !== undefined ? parseLogin(root['login'], root['qr_selector']) : undefined;
+
   return {
     connector,
     version,
@@ -440,6 +560,7 @@ function validateManifest(raw: unknown): ManifestRaw {
     ...(auth !== undefined ? { auth } : {}),
     ...(http !== undefined ? { http } : {}),
     capabilities,
+    ...(login !== undefined ? { login } : {}),
   };
 }
 
@@ -459,6 +580,7 @@ export function loadManifest(yamlString: string): CompiledConnector {
     title: manifest.title,
     transport,
     capabilities,
+    ...(manifest.login !== undefined ? { login: manifest.login } : {}),
   };
 }
 

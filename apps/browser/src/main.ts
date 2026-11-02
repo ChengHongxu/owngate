@@ -38,14 +38,24 @@ function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.length > 0
 }
 
-export async function buildBrowserServer() {
+/** Optional overrides, for tests. Production calls buildBrowserServer() with none. */
+export interface BrowserServerDeps {
+  /** Capability executor. Default: the real execCapability. */
+  exec?: typeof execCapability
+  /** Default: a SessionManager on BROWSER_PROFILES_DIR and BROWSER_EGRESS_PROXY. */
+  sessionManager?: SessionManager
+}
+
+export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
   // Read the secret at build time, not module load: tests set it in beforeAll.
   // An empty key would make every signature forgeable, so refuse to start.
   const rpcSecret = readSecret('BROWSER_RPC_SECRET')
   if (rpcSecret === undefined) {
     throw new Error('BROWSER_RPC_SECRET or BROWSER_RPC_SECRET_FILE must be set')
   }
-  const sessionManager = new SessionManager(PROFILES_DIR, process.env['BROWSER_EGRESS_PROXY'])
+  const exec = deps.exec ?? execCapability
+  const sessionManager =
+    deps.sessionManager ?? new SessionManager(PROFILES_DIR, process.env['BROWSER_EGRESS_PROXY'])
   const checkCache = new Map<string, CheckCacheEntry>()
 
   const app = Fastify({
@@ -219,7 +229,7 @@ export async function buildBrowserServer() {
       const release = await entry.lock.acquire()
       let result: ExecResult
       try {
-        result = await execCapability(entry.context, capability, params, deadline_ms)
+        result = await exec(entry.context, capability, params, deadline_ms)
       } finally {
         release()
       }

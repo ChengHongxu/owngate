@@ -51,8 +51,16 @@ export class SessionManager {
   private readonly xvfb = new XvfbManager()
   /** One pool per profile base directory — BrowserPool appends `/<connectionId>`. */
   private readonly pools = new Map<string, BrowserPool>()
-  /** Live entries, kept in sync with what the pools hand out. */
+  /**
+   * Live entries, mirroring what the pools hand out. An entry is removed when
+   * its context emits 'close' (idle reclaim, closeSession, crash), see track().
+   */
   private readonly entries = new Map<string, BrowserEntry>()
+  /**
+   * Profile base dir each connection was opened with. Kept across an idle
+   * reclaim so the relaunch reuses the same (logged-in) profile.
+   */
+  private readonly profileDirs = new Map<string, string>()
   private readonly streamTokens = new Map<string, StreamTokenEntry>()
   private readonly loginState = new Map<string, LoginState>()
   private readonly loginStatus = new LoginStateTracker()
@@ -70,8 +78,8 @@ export class SessionManager {
   ) {}
 
   async openSession(connectionId: string, profilePath: string): Promise<{ session_id: string }> {
-    const entry = await this.poolFor(profilePath || this.defaultProfilesDir).acquire(connectionId)
-    this.entries.set(connectionId, entry)
+    this.profileDirs.set(connectionId, profilePath || this.defaultProfilesDir)
+    await this.entry(connectionId)
     return { session_id: connectionId }
   }
 
@@ -81,6 +89,7 @@ export class SessionManager {
     this.loginStatus.clear(connectionId)
     this.successConditions.delete(connectionId)
     this.entries.delete(connectionId)
+    this.profileDirs.delete(connectionId)
     await Promise.all(Array.from(this.pools.values()).map((pool) => pool.close(connectionId)))
   }
 
@@ -95,8 +104,16 @@ export class SessionManager {
   ): Promise<{ stream_token: string }> {
     const { qrSelector, deadlineMs, successWhen } = options
     const entry = await this.entry(connectionId)
-    const page = entry.context.pages()[0] ?? (await entry.context.newPage())
-    await page.goto(url)
+    // Same per-connection lock as /v1/check: do not navigate under a running
+    // exec. Held for the navigation only; the login wait below runs unlocked
+    // (it only reads cookies and the URL) and can last up to 15 minutes.
+    const release = await entry.lock.acquire()
+    try {
+      const page = entry.context.pages()[0] ?? (await entry.context.newPage())
+      await page.goto(url)
+    } finally {
+      release()
+    }
 
     this.loginState.set(connectionId, {
       ...(qrSelector !== undefined ? { qrSelector } : {}),
@@ -172,26 +189,24 @@ export class SessionManager {
     return this.loginState.get(connectionId)?.qrSelector
   }
 
-  /** Acquire (creating if needed) the live browser entry for a connection. */
+  /**
+   * Acquire (creating if needed) the live browser entry for a connection.
+   * Always goes through the pool: that resets its idle timer, shares a launch
+   * already in flight, and relaunches after an idle reclaim.
+   */
   async entry(connectionId: string): Promise<BrowserEntry> {
-    const existing = this.getEntry(connectionId)
-    if (existing) return existing
-    const entry = await this.poolFor(this.defaultProfilesDir).acquire(connectionId)
-    this.entries.set(connectionId, entry)
+    const profilesDir = this.profileDirs.get(connectionId) ?? this.defaultProfilesDir
+    const entry = await this.poolFor(profilesDir).acquire(connectionId)
+    this.track(connectionId, entry)
     return entry
   }
 
-  /** Existing live entry, or undefined. Closed contexts are evicted. */
+  /**
+   * Existing live entry, or undefined. Does not launch a browser. Closed
+   * entries are already gone: track() removes them on the context's 'close'.
+   */
   getEntry(connectionId: string): BrowserEntry | undefined {
-    const entry = this.entries.get(connectionId)
-    if (!entry) return undefined
-    try {
-      entry.context.pages()
-      return entry
-    } catch {
-      this.entries.delete(connectionId)
-      return undefined
-    }
+    return this.entries.get(connectionId)
   }
 
   getHealthStatus(): { browsers: { connection_id: string; display: string }[] } {
@@ -209,7 +224,20 @@ export class SessionManager {
     this.loginStatus.clearAll()
     this.successConditions.clear()
     this.entries.clear()
+    this.profileDirs.clear()
     await Promise.all(Array.from(this.pools.values()).map((pool) => pool.closeAll()))
+  }
+
+  /** Mirror `entry` in `entries` until its context closes. */
+  private track(connectionId: string, entry: BrowserEntry): void {
+    if (this.entries.get(connectionId) === entry) return
+    this.entries.set(connectionId, entry)
+    // Playwright emits 'close' for every way a context ends: pool idle reclaim,
+    // closeSession, a browser crash. The identity check keeps a late event
+    // from removing a newer entry for the same connection.
+    entry.context.once('close', () => {
+      if (this.entries.get(connectionId) === entry) this.entries.delete(connectionId)
+    })
   }
 
   private poolFor(profilesDir: string): BrowserPool {
@@ -224,9 +252,18 @@ export class SessionManager {
             },
           }
         : {}
-    const pool = new BrowserPool(this.xvfb, profilesDir, options)
+    const pool = this.createPool(this.xvfb, profilesDir, options)
     this.pools.set(profilesDir, pool)
     return pool
+  }
+
+  /** Protected so tests can substitute a pool that launches a fake browser. */
+  protected createPool(
+    xvfb: XvfbManager,
+    profilesDir: string,
+    options: BrowserPoolOptions,
+  ): BrowserPool {
+    return new BrowserPool(xvfb, profilesDir, options)
   }
 
   /** Never rejects: an error becomes a failed result, so the state ends in timeout. */

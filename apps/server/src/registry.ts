@@ -4,7 +4,7 @@
 
 import type { Capability } from '@webridge/core'
 import { loadManifestFile } from '@webridge/connector-runtime'
-import type { CompiledConnector } from '@webridge/connector-runtime'
+import type { CompiledConnector, LoginConfig } from '@webridge/connector-runtime'
 import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Vault } from '@webridge/vault'
@@ -22,6 +22,8 @@ export interface ManifestEntry {
     success_when?: string
     auth_failed_when?: string
   }>
+  /** Manifest `login:` block (§4.4.3); absent for connectors without remote login. */
+  login?: LoginConfig
 }
 
 export class ConnectorRegistry {
@@ -57,17 +59,27 @@ export class ConnectorRegistry {
     const entry: ManifestEntry = {
       compiled,
       capabilityDefs: {},
+      ...(compiled.login !== undefined ? { login: compiled.login } : {}),
     }
     this.manifests.set(compiled.id, entry)
     return compiled
   }
 
   register(connectorId: string, compiled: CompiledConnector): void {
-    this.manifests.set(connectorId, { compiled, capabilityDefs: {} })
+    this.manifests.set(connectorId, {
+      compiled,
+      capabilityDefs: {},
+      ...(compiled.login !== undefined ? { login: compiled.login } : {}),
+    })
   }
 
   getManifest(connectorId: string): ManifestEntry | undefined {
     return this.manifests.get(connectorId)
+  }
+
+  /** Login settings (URL, success condition, whoami) declared by the connector's manifest. */
+  getLogin(connectorId: string): LoginConfig | undefined {
+    return this.manifests.get(connectorId)?.login
   }
 
   getCapability(connectorId: string, capabilityId: string): Capability | undefined {
