@@ -8,7 +8,7 @@
     "./worker": "./dist/worker.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && cp src/migrate.sql dist/migrate.sql",
     "dev": "tsc -p tsconfig.json --watch",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -22,6 +22,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
     "drizzle-kit": "^0.31.0",
+    "tsx": "^4.20.0",
     "typescript": "^5.8.0",
     "vitest": "^3.2.0"
   }
