@@ -14,3 +14,4 @@ deploy/secrets
 scripts/sandbox-test/out
 coverage
 .turbo
+**/*.tsbuildinfo

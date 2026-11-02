@@ -28,6 +28,10 @@ services:
     environment:
       # 从 Docker secret 读取主密钥，覆盖 .env 中的占位
       MASTER_KEY_HEX_FILE: /run/secrets/master_key
+      # 容器内路径固定，覆盖 .env 中可能写成本机路径的值
+      CONNECTORS_DIR: /app/connectors
+      WEB_ROOT: /app/apps/web/dist
+      DB_PATH: /data/webridge.db
     restart: unless-stopped
 
   browser:

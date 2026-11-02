@@ -29,6 +29,8 @@ COPY packages/vault/package.json packages/vault/tsconfig.json ./packages/vault/
 COPY packages/schema-meta/package.json packages/schema-meta/tsconfig.json ./packages/schema-meta/
 COPY packages/connector-runtime/package.json packages/connector-runtime/tsconfig.json ./packages/connector-runtime/
 COPY packages/browser-runtime/package.json packages/browser-runtime/tsconfig.json ./packages/browser-runtime/
+COPY apps/web/package.json ./apps/web/
+COPY services/egress-proxy/package.json ./services/egress-proxy/
 
 RUN pnpm install --frozen-lockfile
 
@@ -64,6 +66,9 @@ COPY --from=builder /repo/packages/schema-meta/dist ./packages/schema-meta/dist
 COPY --from=builder /repo/packages/schema-meta/package.json ./packages/schema-meta/package.json
 COPY --from=builder /repo/packages/connector-runtime/dist ./packages/connector-runtime/dist
 COPY --from=builder /repo/packages/connector-runtime/package.json ./packages/connector-runtime/package.json
+# 连接器清单（CONNECTORS_DIR）与后台前端产物（WEB_ROOT），路径与 compose 中一致
+COPY --from=builder /repo/connectors ./connectors
+COPY --from=builder /repo/apps/web/dist ./apps/web/dist
 
 ENV NODE_ENV=production
 
