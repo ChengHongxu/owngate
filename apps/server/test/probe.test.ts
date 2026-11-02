@@ -190,10 +190,10 @@ describe('probe routes', () => {
     app = undefined;
   });
 
-  async function build(requireAdmin?: () => Promise<boolean>) {
+  async function build(requireAdmin: () => Promise<boolean> = async () => true) {
     const { scheduler } = setup([conn('a'), conn('b')], async () => ({ status: 'needs_auth' }));
     app = Fastify({ logger: false });
-    await registerProbeRoutes(app, requireAdmin === undefined ? { scheduler } : { scheduler, requireAdmin });
+    await registerProbeRoutes(app, { scheduler, requireAdmin });
     await app.ready();
     return app;
   }
@@ -233,6 +233,7 @@ describe('probe routes', () => {
     for (const [method, url] of [['POST', '/admin/probe/a'], ['POST', '/admin/probe'], ['GET', '/admin/probe/status']] as const) {
       const res = await a.inject({ method, url });
       expect(res.statusCode).toBe(401);
+      expect(res.json()).toMatchObject({ code: 'NO_SESSION' });
     }
   });
 });

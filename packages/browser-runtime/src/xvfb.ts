@@ -10,6 +10,12 @@ interface DisplayEntry {
 
 export class XvfbManager {
   private entries = new Map<string, DisplayEntry>()
+  /**
+   * Starts in flight. Concurrent start() calls for one connection share the
+   * promise, so one connection never ends up with two displays (and a leaked
+   * Xvfb process).
+   */
+  private starting = new Map<string, Promise<DisplayEntry>>()
   private nextDisplay = 10
 
   constructor() {
@@ -27,7 +33,28 @@ export class XvfbManager {
   async start(connectionId: string): Promise<{ display: string; pid: number }> {
     const existing = this.entries.get(connectionId)
     if (existing) return existing
+    const inflight = this.starting.get(connectionId)
+    if (inflight) return inflight
 
+    const started = this.spawnDisplay()
+      .then((entry) => {
+        // stop() during the start removed the marker: do not resurrect the entry.
+        if (this.starting.get(connectionId) === started) {
+          this.entries.set(connectionId, entry)
+        } else {
+          killQuietly(entry.pid)
+        }
+        return entry
+      })
+      .finally(() => {
+        if (this.starting.get(connectionId) === started) this.starting.delete(connectionId)
+      })
+    this.starting.set(connectionId, started)
+    return started
+  }
+
+  /** Spawn one Xvfb and wait until it accepts clients. Protected for tests. */
+  protected async spawnDisplay(): Promise<DisplayEntry> {
     const displayNum = this.nextDisplay++
     const display = `:${displayNum}`
 
@@ -67,20 +94,20 @@ export class XvfbManager {
       )
     }
 
-    const entry: DisplayEntry = { display, pid }
-    this.entries.set(connectionId, entry)
-    return entry
+    return { display, pid }
   }
 
   async stop(connectionId: string): Promise<void> {
+    const inflight = this.starting.get(connectionId)
+    if (inflight) {
+      // Let the start finish, then kill what it spawned (see start()).
+      this.starting.delete(connectionId)
+      await inflight.catch(() => undefined)
+    }
     const entry = this.entries.get(connectionId)
     if (!entry) return
     this.entries.delete(connectionId)
-    try {
-      process.kill(entry.pid)
-    } catch {
-      // ignore — process may already be gone
-    }
+    killQuietly(entry.pid)
   }
 
   getDisplay(connectionId: string): string | undefined {
@@ -93,6 +120,15 @@ export class XvfbManager {
       display: entry.display,
       pid: entry.pid,
     }))
+  }
+}
+
+function killQuietly(pid: number): void {
+  if (pid <= 0) return
+  try {
+    process.kill(pid)
+  } catch {
+    // ignore — process may already be gone
   }
 }
 

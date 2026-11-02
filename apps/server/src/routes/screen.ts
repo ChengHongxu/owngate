@@ -17,13 +17,25 @@ export interface ScreenDeps {
   getAdminUserId: (request: FastifyRequest) => Promise<string | null>;
   /** True when the session has passed step-up auth (design §7.2). */
   hasStepUp: (request: FastifyRequest) => Promise<boolean>;
-  /** Forwards to the browser worker: POST /v1/login/start */
-  startLogin: (connectionId: string, url: string, qrSelector?: string) => Promise<{ stream_token: string }>;
-  stopLogin: (connectionId: string) => Promise<{ ok: boolean }>;
+  /** BrowserClient instance for calling the worker. */
+  browserClient: {
+    startLogin: (req: {
+      connection_id: string;
+      url: string;
+      success_when: unknown[];
+      qr_selector?: string;
+      deadline_ms?: number;
+    }) => Promise<{ stream_token: string }>;
+    stopLogin: (connectionId: string) => Promise<{ ok: boolean }>;
+    loginStatus: (connectionId: string) => Promise<{ status: string; reason?: string; since: string }>;
+    openScreencast: (streamToken: string) => WebSocket;
+  };
+  /** Connection map for looking up connectors. */
+  connectionMap: Map<string, { id: string; connector_id: string }>;
+  /** Connector registry for login settings. */
+  getLogin: (connectorId: string) => { url: string; successWhen: unknown[]; qrSelector?: string } | undefined;
   /** Append to audit_log */
   audit: (entry: { action: string; target?: string; detail?: unknown; client_id?: string }) => void;
-  /** Opens the HMAC-signed upstream socket: GET /v1/screencast?token=... */
-  openUpstream: (streamToken: string) => WebSocket;
 }
 
 export interface TicketEntry {
@@ -59,7 +71,9 @@ export function __resetTickets(): void {
   tickets.clear();
 }
 
-const UNAUTHORIZED = { code: 'UNAUTHORIZED' };
+// Admin session codes (NO_SESSION / SESSION_EXPIRED / STEP_UP_REQUIRED) are
+// not §6.1 ErrorCodes; same 401 body as the admin gate in auth/guard.ts.
+const NO_SESSION = { error: 'Not authenticated', code: 'NO_SESSION' };
 const STEP_UP_REQUIRED = {
   code: 'STEP_UP_REQUIRED',
   what_happened: '远程画面等于完全控制该账号，需要二次验证',
@@ -80,34 +94,53 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
   }
 
   // ── POST /admin/screen/:connectionId/open ──────────────────────────────
+  // §4.4.3: url comes from the manifest login.url; no longer accepts url in body.
   app.post<{
     Params: { connectionId: string };
-    Body: { url: string; qr_selector?: string };
+    Body: Record<string, unknown>;
   }>('/admin/screen/:connectionId/open', {
     schema: {
       body: {
         type: 'object',
-        required: ['url'],
-        properties: {
-          url: { type: 'string' },
-          qr_selector: { type: 'string' },
-        },
+        additionalProperties: false,
+        properties: {},
       },
     },
   }, async (request, reply) => {
     const userId = await deps.getAdminUserId(request);
-    if (userId === null) return reply.status(401).send(UNAUTHORIZED);
+    if (userId === null) return reply.status(401).send(NO_SESSION);
 
     if (!(await deps.hasStepUp(request))) {
       return reply.status(403).send(STEP_UP_REQUIRED);
     }
 
     const { connectionId } = request.params;
-    const { url, qr_selector: qrSelector } = request.body;
+    const conn = deps.connectionMap.get(connectionId);
+    if (!conn) {
+      return reply.status(404).send({
+        code: 'CONNECTION_NOT_FOUND',
+        what_happened: '连接不存在',
+        next_step: '检查连接 ID 是否正确',
+      });
+    }
+
+    const login = deps.getLogin(conn.connector_id);
+    if (!login) {
+      return reply.status(400).send({
+        code: 'CAPABILITY_UNSUPPORTED',
+        what_happened: '该连接的清单中没有 login 段，不支持远程登录',
+        next_step: '此连接只能通过其他方式（如令牌）认证',
+      });
+    }
 
     let streamToken: string;
     try {
-      const started = await deps.startLogin(connectionId, url, qrSelector);
+      const started = await deps.browserClient.startLogin({
+        connection_id: connectionId,
+        url: login.url,
+        success_when: login.successWhen as unknown as unknown[],
+        ...(login.qrSelector !== undefined ? { qr_selector: login.qrSelector } : {}),
+      });
       streamToken = started.stream_token;
     } catch (e) {
       return reply.status(502).send({
@@ -129,7 +162,7 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
     deps.audit({
       action: 'screen.open',
       target: connectionId,
-      detail: { url, qr_selector: qrSelector ?? null, user_id: userId },
+      detail: { url: login.url, qr_selector: login.qrSelector ?? null, user_id: userId },
     });
 
     return { ticket, ws_path: '/ws/screen/' + connectionId + '?ticket=' + ticket };
@@ -168,7 +201,7 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
         // signed client socket to the browser worker.
         let upstream: WebSocket;
         try {
-          upstream = deps.openUpstream(entry.streamToken);
+          upstream = deps.browserClient.openScreencast(entry.streamToken);
         } catch (e) {
           app.log.error({ err: (e as Error).message }, 'screencast upstream failed');
           client.close(1011, 'upstream unavailable');
@@ -247,14 +280,14 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
     '/admin/screen/:connectionId/stop',
     async (request, reply) => {
       const userId = await deps.getAdminUserId(request);
-      if (userId === null) return reply.status(401).send(UNAUTHORIZED);
+      if (userId === null) return reply.status(401).send(NO_SESSION);
 
       if (!(await deps.hasStepUp(request))) {
         return reply.status(403).send(STEP_UP_REQUIRED);
       }
 
       const { connectionId } = request.params;
-      const result = await deps.stopLogin(connectionId);
+      const result = await deps.browserClient.stopLogin(connectionId);
 
       deps.audit({
         action: 'screen.stop',
@@ -263,6 +296,27 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
       });
 
       return { ok: result.ok };
+    },
+  );
+
+  // ── GET /admin/screen/:connectionId/status ──────────────────────────────
+  // Requires admin session (会话即可), not step-up, so the login page can poll.
+  app.get<{ Params: { connectionId: string } }>(
+    '/admin/screen/:connectionId/status',
+    async (request, reply) => {
+      const userId = await deps.getAdminUserId(request);
+      if (userId === null) return reply.status(401).send(NO_SESSION);
+
+      const { connectionId } = request.params;
+      try {
+        const status = await deps.browserClient.loginStatus(connectionId);
+        return status;
+      } catch (e) {
+        return reply.status(502).send({
+          code: 'UPSTREAM_ERROR',
+          what_happened: (e as Error).message,
+        });
+      }
     },
   );
 
@@ -290,7 +344,7 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
     },
   }, async (request, reply) => {
     const userId = await deps.getAdminUserId(request);
-    if (userId === null) return reply.status(401).send(UNAUTHORIZED);
+    if (userId === null) return reply.status(401).send(NO_SESSION);
 
     if (!(await deps.hasStepUp(request))) {
       return reply.status(403).send(STEP_UP_REQUIRED);

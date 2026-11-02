@@ -6,9 +6,12 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { buildServer } from '../src/main.js'
 import type { FastifyInstance } from 'fastify'
 import type { ResultEnvelope } from '@webridge/core'
-import { createHash } from 'node:crypto'
+import { adminWithStepUp, tempDbPath } from './helpers/admin.js'
+import type { AdminSession } from './helpers/admin.js'
 
 let app: FastifyInstance
+let admin: AdminSession
+let cleanupDb: () => void
 let token: string
 let clientId: string
 let connId: string
@@ -39,13 +42,18 @@ const BASE_CAP = {
 } as const
 
 beforeAll(async () => {
-  const server = await buildServer()
+  const db = tempDbPath()
+  cleanupDb = db.cleanup
+  const server = await buildServer({ dbPath: db.path })
   app = server.app
+  // Admin routes need a session; clients and grants also need step-up (§8.4).
+  admin = await adminWithStepUp(app)
 
   // Register capability
   await app.inject({
     method: 'POST',
     url: '/admin/capabilities',
+    headers: admin.headers,
     payload: { connector_id: 'test-connector', capability: BASE_CAP },
   })
 
@@ -53,6 +61,7 @@ beforeAll(async () => {
   const connResp = await app.inject({
     method: 'POST',
     url: '/admin/connections',
+    headers: admin.headers,
     payload: {
       connector_id: 'test-connector',
       label: 'M0 Test Site',
@@ -65,6 +74,7 @@ beforeAll(async () => {
   const clientResp = await app.inject({
     method: 'POST',
     url: '/admin/clients',
+    headers: admin.headers,
     payload: { label: 'M0 Test Client', kind: 'cli' },
   })
   const clientData = JSON.parse(clientResp.body)
@@ -75,12 +85,14 @@ beforeAll(async () => {
   await app.inject({
     method: 'POST',
     url: '/admin/grants',
+    headers: admin.headers,
     payload: { client_id: clientId, connection_id: connId, capabilities: ['*'] },
   })
 })
 
 afterAll(async () => {
   await app.close()
+  cleanupDb()
 })
 
 // ── §15 验收 1: 同一能力在三个入口返回字段完全一致的信封 ──────────────────
@@ -131,6 +143,7 @@ describe('M0 验收 1 — 三入口信封字段一致', () => {
   it('REST invoke returns success envelope', async () => {
     const env = await invokeViaRest()
     expect(env.outcome).toBe('success')
+    expect(env.status).toBe('ok')
     expect(env.source.connection_id).toBe(connId)
     expect(env.source.capability_id).toBe('echo.ping')
     expect(env.data).not.toBeNull()
@@ -141,6 +154,7 @@ describe('M0 验收 1 — 三入口信封字段一致', () => {
     const rest = await invokeViaRest()
     const mcp = await invokeViaMcp()
     expect(mcp.outcome).toBe(rest.outcome)
+    expect(mcp.status).toBe(rest.status)
     expect(mcp.source.connection_id).toBe(rest.source.connection_id)
     expect(mcp.source.capability_id).toBe(rest.source.capability_id)
     expect(Object.keys(mcp.data as object).sort()).toEqual(
@@ -150,6 +164,7 @@ describe('M0 验收 1 — 三入口信封字段一致', () => {
 
   it('envelope always has required fields', async () => {
     const env = await invokeViaRest()
+    expect(env).toHaveProperty('status')
     expect(env).toHaveProperty('outcome')
     expect(env).toHaveProperty('data')
     expect(env).toHaveProperty('error')
@@ -172,6 +187,7 @@ describe('M0 验收 2 — 撤销即时性', () => {
     const clientResp = await app.inject({
       method: 'POST',
       url: '/admin/clients',
+      headers: admin.headers,
       payload: { label: 'Revoke Test Client', kind: 'cli' },
     })
     const data = JSON.parse(clientResp.body)
@@ -181,6 +197,7 @@ describe('M0 验收 2 — 撤销即时性', () => {
     await app.inject({
       method: 'POST',
       url: '/admin/grants',
+      headers: admin.headers,
       payload: { client_id: revokeClientId, connection_id: connId, capabilities: ['*'] },
     })
 
@@ -196,6 +213,7 @@ describe('M0 验收 2 — 撤销即时性', () => {
     await app.inject({
       method: 'POST',
       url: `/admin/clients/${revokeClientId}/revoke`,
+      headers: admin.headers,
     })
   })
 
@@ -241,12 +259,25 @@ describe('M0 验收 2 — 撤销即时性', () => {
 // ── §15 验收 3: 错误码一致性 ──────────────────────────────────────────────────
 
 describe('M0 验收 3 — 错误码一致性', () => {
-  it('UNAUTHORIZED on missing token', async () => {
+  it('401 on missing token', async () => {
     const resp = await app.inject({
       method: 'POST',
       url: '/api/invoke',
       payload: { connection_id: connId, capability_id: 'echo.ping', input: {} },
     })
+    expect(resp.statusCode).toBe(401)
+  })
+
+  it('UNAUTHENTICATED on unknown token', async () => {
+    const resp = await app.inject({
+      method: 'POST',
+      url: '/api/invoke',
+      headers: { authorization: 'Bearer not-a-real-token' },
+      payload: { connection_id: connId, capability_id: 'echo.ping', input: {} },
+    })
+    const body = JSON.parse(resp.body) as ResultEnvelope
+    expect(body.error?.code).toBe('UNAUTHENTICATED')
+    expect(body.status).toBe('forbidden')
     expect(resp.statusCode).toBe(401)
   })
 
@@ -274,10 +305,11 @@ describe('M0 验收 3 — 错误码一致性', () => {
     expect(resp.statusCode).toBe(404)
   })
 
-  it('FORBIDDEN when no grant', async () => {
+  it('PERMISSION_DENIED when no grant', async () => {
     const noGrantResp = await app.inject({
       method: 'POST',
       url: '/admin/clients',
+      headers: admin.headers,
       payload: { label: 'No Grant Client', kind: 'cli' },
     })
     const noGrantToken = JSON.parse(noGrantResp.body).token
@@ -289,14 +321,16 @@ describe('M0 验收 3 — 错误码一致性', () => {
       payload: { connection_id: connId, capability_id: 'echo.ping', input: {} },
     })
     const body = JSON.parse(resp.body) as ResultEnvelope
-    expect(body.error?.code).toBe('FORBIDDEN')
+    expect(body.error?.code).toBe('PERMISSION_DENIED')
+    expect(body.status).toBe('forbidden')
     expect(resp.statusCode).toBe(403)
   })
 
-  it('ACTION_DISABLED for action capabilities (D9)', async () => {
+  it('CAPABILITY_DISABLED for action capabilities (D9)', async () => {
     await app.inject({
       method: 'POST',
       url: '/admin/capabilities',
+      headers: admin.headers,
       payload: {
         connector_id: 'test-connector',
         capability: {
@@ -316,7 +350,8 @@ describe('M0 验收 3 — 错误码一致性', () => {
       payload: { connection_id: connId, capability_id: 'post.create', input: {} },
     })
     const body = JSON.parse(resp.body) as ResultEnvelope
-    expect(body.error?.code).toBe('ACTION_DISABLED')
+    expect(body.error?.code).toBe('CAPABILITY_DISABLED')
+    expect(body.status).toBe('unsupported')
   })
 })
 

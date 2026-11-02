@@ -5,6 +5,7 @@ import {
   BrowserPool,
   XvfbManager,
   ProxyCredentialStore,
+  InvalidConnectionIdError,
   checkLoginOnce,
   waitForLogin,
 } from '@webridge/browser-runtime'
@@ -16,17 +17,29 @@ import type {
 } from '@webridge/browser-runtime'
 import { LoginStateTracker, type LoginStateSnapshot } from './login-state.js'
 import type { ImportedCookie } from './cookies.js'
+import { BrowserUnavailableError, CookieRejectedError } from './errors.js'
 
 const STREAM_TOKEN_TTL_MS = 5 * 60 * 1000
-/** Default login wait: matches the 15-minute idle cap on login sessions (§4.4.5). */
+/**
+ * Longest login wait, and the default: a login session closes after 15
+ * minutes (§4.4.5). The worker sees no input events in M1, so this counts
+ * from the start of the login, not from the last input.
+ */
 export const DEFAULT_LOGIN_WAIT_MS = 15 * 60 * 1000
+/** A lock waiter that keeps finding a closed entry gives up after this many tries. */
+const MAX_STALE_RETRIES = 3
 
 export interface StartLoginOptions {
+  /** Any one holding means logged in (design §13.1). Required: without it a wait can only time out. */
+  successWhen: readonly LoginCondition[]
   qrSelector?: string
-  /** How long to wait for the success condition, in ms. */
+  /** How long to wait for the success condition, in ms. Capped at DEFAULT_LOGIN_WAIT_MS. */
   deadlineMs?: number
-  /** Without it nothing can prove success, so the wait can only end in timeout. */
-  successWhen?: LoginCondition
+}
+
+export interface SessionManagerOptions {
+  /** Browser idle reclaim; default the pool's 10 minutes. */
+  idleTimeoutMs?: number
 }
 
 interface StreamTokenEntry {
@@ -34,146 +47,151 @@ interface StreamTokenEntry {
   expiresAt: number
 }
 
-interface LoginState {
-  qrSelector?: string
-  deadlineMs?: number
-}
-
 /**
  * Browser worker session manager.
  *
- * `egressProxyServer` (env BROWSER_EGRESS_PROXY, e.g. http://egress:3128) makes
- * every browser go through the egress proxy — design §4.4.1 requires it: the
- * container has no direct route out. When unset, browsers talk to the network
- * directly, which is only acceptable for local development.
+ * Profiles live at `<profilesDir>/<connection_id>`; the server never names a
+ * path (design §13.1). `egressProxyServer` (env BROWSER_EGRESS_PROXY, e.g.
+ * http://egress:3128) makes every browser go through the egress proxy —
+ * design §4.4.1 requires it: the container has no direct route out. When
+ * unset, browsers talk to the network directly, which is only acceptable for
+ * local development.
+ *
+ * Leases (BrowserPool.hold) keep a browser from idle reclaim while a login
+ * wait, a screencast socket, /v1/check or /v1/probe needs it.
  */
 export class SessionManager {
   private readonly xvfb = new XvfbManager()
-  /** One pool per profile base directory — BrowserPool appends `/<connectionId>`. */
-  private readonly pools = new Map<string, BrowserPool>()
-  /**
-   * Live entries, mirroring what the pools hand out. An entry is removed when
-   * its context emits 'close' (idle reclaim, closeSession, crash), see track().
-   */
-  private readonly entries = new Map<string, BrowserEntry>()
-  /**
-   * Profile base dir each connection was opened with. Kept across an idle
-   * reclaim so the relaunch reuses the same (logged-in) profile.
-   */
-  private readonly profileDirs = new Map<string, string>()
+  /** Created on first use so subclasses can override createPool(). */
+  private pool: BrowserPool | undefined
   private readonly streamTokens = new Map<string, StreamTokenEntry>()
-  private readonly loginState = new Map<string, LoginState>()
+  /** qr_selector of the login in progress, per connection. */
+  private readonly qrSelectors = new Map<string, string>()
   private readonly loginStatus = new LoginStateTracker()
   /**
-   * Last success condition per connection. Outlives stopLogin so a later cookie
-   * import can verify against it; dropped on closeSession.
+   * Last success conditions per connection. Outlive the login wait so a later
+   * cookie import can verify against them; dropped on closeSession.
    */
-  private readonly successConditions = new Map<string, LoginCondition>()
-  /** Per-connection proxy credentials, shared by every pool in this process. */
+  private readonly successConditions = new Map<string, readonly LoginCondition[]>()
+  /** Closers of open screencast sockets, per connection. */
+  private readonly screens = new Map<string, Set<() => void>>()
+  /** Per-connection proxy credentials. */
   private readonly proxyCredentials = new ProxyCredentialStore()
 
   constructor(
-    private readonly defaultProfilesDir: string,
+    private readonly profilesDir: string,
     private readonly egressProxyServer?: string,
+    private readonly options: SessionManagerOptions = {},
   ) {}
 
-  async openSession(connectionId: string, profilePath: string): Promise<{ session_id: string }> {
-    this.profileDirs.set(connectionId, profilePath || this.defaultProfilesDir)
+  async openSession(connectionId: string): Promise<{ session_id: string }> {
     await this.entry(connectionId)
     return { session_id: connectionId }
   }
 
+  /** Ends any login, closes screencast sockets, then closes the browser after the running request. */
   async closeSession(connectionId: string): Promise<void> {
-    this.revokeStreamTokens(connectionId)
-    this.loginState.delete(connectionId)
     this.loginStatus.clear(connectionId)
+    this.endScreen(connectionId)
     this.successConditions.delete(connectionId)
-    this.entries.delete(connectionId)
-    this.profileDirs.delete(connectionId)
-    await Promise.all(Array.from(this.pools.values()).map((pool) => pool.close(connectionId)))
+    await this.getPool().close(connectionId)
   }
 
   /**
-   * Open the login page and start watching for the success condition in the
-   * background. Poll getLoginState for the outcome.
+   * Open the login page and start watching for the success conditions in the
+   * background. Poll getLoginState for the outcome. A lease is held from the
+   * call until the wait ends, so idle reclaim cannot close the browser during
+   * a long QR-code login.
    */
   async startLogin(
     connectionId: string,
     url: string,
-    options: StartLoginOptions = {},
+    options: StartLoginOptions,
   ): Promise<{ stream_token: string }> {
-    const { qrSelector, deadlineMs, successWhen } = options
-    const entry = await this.entry(connectionId)
-    // Same per-connection lock as /v1/check: do not navigate under a running
-    // exec. Held for the navigation only; the login wait below runs unlocked
-    // (it only reads cookies and the URL) and can last up to 15 minutes.
-    const release = await entry.lock.acquire()
+    const { successWhen, qrSelector } = options
+    const waitMs = Math.min(options.deadlineMs ?? DEFAULT_LOGIN_WAIT_MS, DEFAULT_LOGIN_WAIT_MS)
+    const releaseLease = this.getPool().hold(connectionId)
+    let handedOff = false
     try {
-      const page = entry.context.pages()[0] ?? (await entry.context.newPage())
-      await page.goto(url)
+      // Same per-connection lock as /v1/check: do not navigate under a running
+      // exec. Held for the navigation only; the wait below runs unlocked (it
+      // only reads cookies and the URL).
+      const { entry, attemptId, signal } = await this.withLockedEntry(connectionId, async (entry) => {
+        const page = entry.context.pages()[0] ?? (await entry.context.newPage())
+        await page.goto(url)
+        // Marked pending before the lock is released, so a probe queued on the
+        // lock sees the login and does not navigate away from it.
+        return { entry, ...this.loginStatus.begin(connectionId) }
+      })
+
+      if (qrSelector !== undefined) this.qrSelectors.set(connectionId, qrSelector)
+      else this.qrSelectors.delete(connectionId)
+      this.successConditions.set(connectionId, successWhen)
+
+      handedOff = true
+      void this.runLoginWait(entry, successWhen, waitMs, signal)
+        .then((result) => {
+          // Success or timeout ends the login session: the screen closes (§4.4.3).
+          if (this.loginStatus.settle(connectionId, attemptId, result)) this.endScreen(connectionId)
+        })
+        .finally(releaseLease)
+
+      const token = randomBytes(32).toString('hex')
+      this.streamTokens.set(token, {
+        connectionId,
+        expiresAt: Date.now() + STREAM_TOKEN_TTL_MS,
+      })
+      return { stream_token: token }
     } finally {
-      release()
+      if (!handedOff) releaseLease()
     }
-
-    this.loginState.set(connectionId, {
-      ...(qrSelector !== undefined ? { qrSelector } : {}),
-      ...(deadlineMs !== undefined ? { deadlineMs } : {}),
-    })
-    if (successWhen) this.successConditions.set(connectionId, successWhen)
-
-    const { attemptId, signal } = this.loginStatus.begin(connectionId)
-    void this.runLoginWait(
-      entry,
-      successWhen,
-      deadlineMs ?? DEFAULT_LOGIN_WAIT_MS,
-      signal,
-    ).then((result) => this.loginStatus.settle(connectionId, attemptId, result))
-
-    const token = randomBytes(32).toString('hex')
-    this.streamTokens.set(token, {
-      connectionId,
-      expiresAt: Date.now() + STREAM_TOKEN_TTL_MS,
-    })
-    return { stream_token: token }
   }
 
   async stopLogin(connectionId: string): Promise<void> {
-    this.revokeStreamTokens(connectionId)
-    this.loginState.delete(connectionId)
     this.loginStatus.stop(connectionId)
+    this.endScreen(connectionId)
   }
 
   getLoginState(connectionId: string): LoginStateSnapshot {
     return this.loginStatus.get(connectionId)
   }
 
+  /** A remote login is waiting on this connection (/v1/probe must not navigate). */
+  isLoginInProgress(connectionId: string): boolean {
+    return this.loginStatus.isPending(connectionId)
+  }
+
   /**
    * Write cookies into the connection's context, then probe the success
-   * condition once. `successWhen` falls back to the one from the last
-   * startLogin; with neither, `verified` is false. A url_not_contains
-   * condition is checked against the page as it is now, without reloading.
+   * conditions once. `successWhen` falls back to the one from the last
+   * startLogin; with neither, `logged_in` is false. A url_not_contains
+   * condition is checked against the pages as they are now, without reloading.
+   * Throws CookieRejectedError when the browser refuses the batch.
    */
   async importCookies(
     connectionId: string,
     cookies: ImportedCookie[],
-    successWhen?: LoginCondition,
-  ): Promise<{ imported: number; verified: boolean }> {
-    const entry = await this.entry(connectionId)
-    const condition = successWhen ?? this.successConditions.get(connectionId)
+    successWhen?: readonly LoginCondition[],
+  ): Promise<{ logged_in: boolean }> {
+    const conditions = successWhen ?? this.successConditions.get(connectionId)
+    // Same per-connection lock as /v1/check: do not change cookies under a running exec.
+    const loggedIn = await this.withLockedEntry(connectionId, async (entry) => {
+      try {
+        await entry.context.addCookies(cookies)
+      } catch {
+        // Drop the browser's text: it could quote a cookie value.
+        throw new CookieRejectedError()
+      }
+      if (!conditions) return false
+      return (await checkLoginOnce(entry.context, conditions)) !== null
+    })
     if (successWhen) this.successConditions.set(connectionId, successWhen)
 
-    // Same per-connection lock as /v1/check: do not change cookies under a running exec.
-    const release = await entry.lock.acquire()
-    let verified = false
-    try {
-      await entry.context.addCookies(cookies)
-      if (condition) verified = (await checkLoginOnce(entry.context, condition)) !== null
-    } finally {
-      release()
+    if (loggedIn) {
+      this.loginStatus.markSuccess(connectionId, 'cookie import verified')
+      this.endScreen(connectionId)
     }
-
-    if (verified) this.loginStatus.markSuccess(connectionId, 'cookie import verified')
-    return { imported: cookies.length, verified }
+    return { logged_in: loggedIn }
   }
 
   /** One-time use: a resolved token is removed from the store. */
@@ -186,7 +204,31 @@ export class SessionManager {
   }
 
   getQrSelector(connectionId: string): string | undefined {
-    return this.loginState.get(connectionId)?.qrSelector
+    return this.qrSelectors.get(connectionId)
+  }
+
+  /**
+   * Register an open screencast socket. Holds a lease until the returned
+   * detach function runs (idempotent); `close` is called when the login
+   * session ends (success, timeout, stop, closeSession).
+   */
+  attachScreen(connectionId: string, close: () => void): () => void {
+    const releaseLease = this.getPool().hold(connectionId)
+    let set = this.screens.get(connectionId)
+    if (!set) {
+      set = new Set()
+      this.screens.set(connectionId, set)
+    }
+    const mine = set
+    mine.add(close)
+    let detached = false
+    return () => {
+      if (detached) return
+      detached = true
+      mine.delete(close)
+      if (mine.size === 0 && this.screens.get(connectionId) === mine) this.screens.delete(connectionId)
+      releaseLease()
+    }
   }
 
   /**
@@ -195,18 +237,69 @@ export class SessionManager {
    * already in flight, and relaunches after an idle reclaim.
    */
   async entry(connectionId: string): Promise<BrowserEntry> {
-    const profilesDir = this.profileDirs.get(connectionId) ?? this.defaultProfilesDir
-    const entry = await this.poolFor(profilesDir).acquire(connectionId)
-    this.track(connectionId, entry)
-    return entry
+    return this.getPool().acquire(connectionId)
+  }
+
+  /** Lease + entry, relaunching a reclaimed browser on the same profile. */
+  async lease(connectionId: string): Promise<{ entry: BrowserEntry; release: () => void }> {
+    return this.getPool().lease(connectionId)
   }
 
   /**
-   * Existing live entry, or undefined. Does not launch a browser. Closed
-   * entries are already gone: track() removes them on the context's 'close'.
+   * Run `fn` holding a lease and the connection lock on a live entry. If the
+   * entry was closed while this call waited for the lock (idle reclaim,
+   * closeSession, crash), the lock is dropped and a fresh entry is acquired,
+   * so `fn` never runs on a closed context. When `signal` aborts (deadline)
+   * before `fn` starts, the lock is released without running it.
+   *
+   * Launch failures become BrowserUnavailableError. `fn` must not call
+   * closeSession/pool.close for this connection: they wait for this lock.
    */
+  async withLockedEntry<T>(
+    connectionId: string,
+    fn: (entry: BrowserEntry) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const pool = this.getPool()
+    const releaseLease = pool.hold(connectionId)
+    try {
+      for (let attempt = 0; ; attempt++) {
+        signal?.throwIfAborted()
+        let entry: BrowserEntry
+        try {
+          entry = await pool.acquire(connectionId)
+        } catch (e) {
+          if (e instanceof InvalidConnectionIdError) throw e
+          throw new BrowserUnavailableError(`browser failed to start: ${(e as Error).message}`)
+        }
+        const unlock = await entry.lock.acquire()
+        if (pool.get(connectionId) !== entry) {
+          unlock()
+          if (attempt + 1 >= MAX_STALE_RETRIES) {
+            throw new BrowserUnavailableError('browser kept closing while the request waited')
+          }
+          continue
+        }
+        try {
+          signal?.throwIfAborted()
+          return await fn(entry)
+        } finally {
+          unlock()
+        }
+      }
+    } finally {
+      releaseLease()
+    }
+  }
+
+  /** Existing live entry, or undefined. Does not launch a browser. */
   getEntry(connectionId: string): BrowserEntry | undefined {
-    return this.entries.get(connectionId)
+    return this.getPool().get(connectionId)
+  }
+
+  /** Leases currently out for a connection (diagnostics and tests). */
+  leaseCount(connectionId: string): number {
+    return this.getPool().leaseCount(connectionId)
   }
 
   getHealthStatus(): { browsers: { connection_id: string; display: string }[] } {
@@ -219,42 +312,29 @@ export class SessionManager {
   }
 
   async closeAll(): Promise<void> {
-    this.streamTokens.clear()
-    this.loginState.clear()
     this.loginStatus.clearAll()
+    for (const id of Array.from(this.screens.keys())) this.endScreen(id)
+    this.streamTokens.clear()
+    this.qrSelectors.clear()
     this.successConditions.clear()
-    this.entries.clear()
-    this.profileDirs.clear()
-    await Promise.all(Array.from(this.pools.values()).map((pool) => pool.closeAll()))
+    await this.getPool().closeAll()
   }
 
-  /** Mirror `entry` in `entries` until its context closes. */
-  private track(connectionId: string, entry: BrowserEntry): void {
-    if (this.entries.get(connectionId) === entry) return
-    this.entries.set(connectionId, entry)
-    // Playwright emits 'close' for every way a context ends: pool idle reclaim,
-    // closeSession, a browser crash. The identity check keeps a late event
-    // from removing a newer entry for the same connection.
-    entry.context.once('close', () => {
-      if (this.entries.get(connectionId) === entry) this.entries.delete(connectionId)
-    })
-  }
-
-  private poolFor(profilesDir: string): BrowserPool {
-    const existing = this.pools.get(profilesDir)
-    if (existing) return existing
-    const options: BrowserPoolOptions =
-      this.egressProxyServer !== undefined
+  private getPool(): BrowserPool {
+    if (this.pool) return this.pool
+    const options: BrowserPoolOptions = {
+      ...(this.options.idleTimeoutMs !== undefined ? { idleTimeoutMs: this.options.idleTimeoutMs } : {}),
+      ...(this.egressProxyServer !== undefined
         ? {
             proxy: {
               proxyServer: this.egressProxyServer,
               credentials: this.proxyCredentials,
             },
           }
-        : {}
-    const pool = this.createPool(this.xvfb, profilesDir, options)
-    this.pools.set(profilesDir, pool)
-    return pool
+        : {}),
+    }
+    this.pool = this.createPool(this.xvfb, this.profilesDir, options)
+    return this.pool
   }
 
   /** Protected so tests can substitute a pool that launches a fake browser. */
@@ -269,40 +349,31 @@ export class SessionManager {
   /** Never rejects: an error becomes a failed result, so the state ends in timeout. */
   private async runLoginWait(
     entry: BrowserEntry,
-    successWhen: LoginCondition | undefined,
+    successWhen: readonly LoginCondition[],
     timeoutMs: number,
     signal: AbortSignal,
   ): Promise<LoginResult> {
     try {
-      if (!successWhen) {
-        await abortableDelay(timeoutMs, signal)
-        return { success: false, reason: 'timeout (no success_when supplied, cannot detect login)' }
-      }
       return await waitForLogin(entry.context, { success_when: successWhen }, timeoutMs, signal)
     } catch (e) {
       return { success: false, reason: `login check failed: ${(e as Error).message}` }
     }
   }
 
-  private revokeStreamTokens(connectionId: string): void {
+  /** The login session is over: no new screens, and open ones close. */
+  private endScreen(connectionId: string): void {
     for (const [token, entry] of this.streamTokens) {
       if (entry.connectionId === connectionId) this.streamTokens.delete(token)
     }
+    this.qrSelectors.delete(connectionId)
+    const closers = this.screens.get(connectionId)
+    if (!closers) return
+    for (const close of Array.from(closers)) {
+      try {
+        close()
+      } catch {
+        // a socket that is already gone
+      }
+    }
   }
-}
-
-function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve()
-      return
-    }
-    const done = () => {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', done)
-      resolve()
-    }
-    const timer = setTimeout(done, ms)
-    signal.addEventListener('abort', done, { once: true })
-  })
 }

@@ -3,7 +3,7 @@
 // Every intervalMs (default 6 h) each browser-transport connection runs a
 // lightweight whoami capability through the browser worker:
 //   - needs_auth → every capability of that connection becomes needs_auth, so
-//     invoke() refuses with NEEDS_AUTH instead of returning empty data.
+//     invoke() refuses with AUTH_EXPIRED instead of returning empty data.
 //   - timeout    → state is left alone and the event is audited. One timeout
 //     is not evidence that the login expired (§4.5 熔断 counts consecutive
 //     failures; that counter lives in the dispatcher, not here).

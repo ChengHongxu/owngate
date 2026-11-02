@@ -23,18 +23,32 @@ interface AuditEntry {
 
 function buildDeps(overrides: Partial<ScreenDeps> = {}) {
   const audits: AuditEntry[] = [];
+  const connectionMap = new Map([
+    ['conn-1', { id: 'conn-1', connector_id: 'bilibili' }],
+    ['conn-42', { id: 'conn-42', connector_id: 'bilibili' }],
+  ]);
   const deps: ScreenDeps = {
     getAdminUserId: async (_request: FastifyRequest) => 'user-1',
     hasStepUp: async (_request: FastifyRequest) => true,
-    startLogin: async (_connectionId: string, _url: string, _qrSelector?: string) => ({
-      stream_token: 'stream-token-abc',
+    browserClient: {
+      startLogin: async (_req) => ({ stream_token: 'stream-token-abc' }),
+      stopLogin: async (_connectionId: string) => ({ ok: true }),
+      loginStatus: async (_connectionId: string) => ({
+        status: 'idle',
+        since: new Date().toISOString(),
+      }),
+      openScreencast: (_streamToken: string): WebSocket => {
+        throw new Error('upgrade is not exercised by these HTTP-level tests');
+      },
+    },
+    connectionMap,
+    getLogin: (_connectorId: string) => ({
+      url: 'https://passport.bilibili.com/login',
+      successWhen: [{ type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' }],
+      qrSelector: '#qr img',
     }),
-    stopLogin: async (_connectionId: string) => ({ ok: true }),
     audit: (entry: AuditEntry) => {
       audits.push(entry);
-    },
-    openUpstream: (_streamToken: string): WebSocket => {
-      throw new Error('upgrade is not exercised by these HTTP-level tests');
     },
     ...overrides,
   };
@@ -53,7 +67,7 @@ function openRequest(app: FastifyInstance, connectionId = 'conn-1') {
   return app.inject({
     method: 'POST',
     url: `/admin/screen/${connectionId}/open`,
-    payload: { url: 'https://passport.bilibili.com/login', qr_selector: '#qr img' },
+    payload: {},
   });
 }
 
@@ -77,7 +91,7 @@ describe('screen routes', () => {
     const res = await openRequest(app);
 
     expect(res.statusCode).toBe(401);
-    expect(res.json()).toEqual({ code: 'UNAUTHORIZED' });
+    expect(res.json()).toEqual({ error: 'Not authenticated', code: 'NO_SESSION' });
     // No upstream call, no ticket, no audit trail for an unauthorised attempt.
     expect(built.audits).toHaveLength(0);
   });
@@ -99,7 +113,16 @@ describe('screen routes', () => {
 
   it('POST open returns ticket and ws_path when session and step-up both pass', async () => {
     const startLogin = vi.fn(async () => ({ stream_token: 'stream-token-abc' }));
-    const built = await buildApp({ startLogin });
+    const built = await buildApp({
+      browserClient: {
+        startLogin,
+        stopLogin: async () => ({ ok: true }),
+        loginStatus: async () => ({ status: 'idle', since: new Date().toISOString() }),
+        openScreencast: () => {
+          throw new Error('not exercised');
+        },
+      },
+    });
     app = built.app;
 
     const res = await openRequest(app, 'conn-42');
@@ -109,9 +132,11 @@ describe('screen routes', () => {
     expect(body.ticket).toMatch(/^[0-9a-f]{64}$/);
     expect(body.ws_path).toBe(`/ws/screen/conn-42?ticket=${body.ticket}`);
     expect(startLogin).toHaveBeenCalledWith(
-      'conn-42',
-      'https://passport.bilibili.com/login',
-      '#qr img',
+      expect.objectContaining({
+        connection_id: 'conn-42',
+        url: 'https://passport.bilibili.com/login',
+        qr_selector: '#qr img',
+      }),
     );
     expect(built.audits).toContainEqual(
       expect.objectContaining({ action: 'screen.open', target: 'conn-42' }),
@@ -153,7 +178,16 @@ describe('screen routes', () => {
 
   it('POST stop requires session and step-up, then calls stopLogin and audits', async () => {
     const stopLogin = vi.fn(async () => ({ ok: true }));
-    const built = await buildApp({ stopLogin });
+    const built = await buildApp({
+      browserClient: {
+        startLogin: async () => ({ stream_token: 'abc' }),
+        stopLogin,
+        loginStatus: async () => ({ status: 'idle', since: new Date().toISOString() }),
+        openScreencast: () => {
+          throw new Error('not exercised');
+        },
+      },
+    });
     app = built.app;
 
     const res = await app.inject({

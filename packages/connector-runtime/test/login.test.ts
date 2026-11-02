@@ -39,7 +39,7 @@ describe('loadManifest — login block', () => {
     const c = loadManifest(manifest(LOGIN_OK));
     expect(c.login).toBeDefined();
     expect(c.login?.url).toBe('https://passport.bilibili.com/login');
-    expect(c.login?.successWhen).toEqual({ type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' });
+    expect(c.login?.successWhen).toEqual([{ type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' }]);
     expect(c.login?.whoami).toBe('account.profile');
     expect(c.login?.allowedDomains).toEqual(['bilibili.com', 'hdslb.com', 'bilivideo.com', 'biliapi.net']);
     expect(c.login).not.toHaveProperty('qrSelector');
@@ -55,11 +55,11 @@ login:
 `));
     expect(c.login).toEqual({
       url: 'https://example.com/login',
-      successWhen: { type: 'url_not_contains', pattern: '/login' },
+      successWhen: [{ type: 'url_not_contains', pattern: '/login' }],
     });
   });
 
-  it('uses the first condition when several are listed', () => {
+  it('keeps all conditions in successWhen array', () => {
     const c = loadManifest(manifest(`
 login:
   url: https://example.com/login
@@ -68,7 +68,10 @@ login:
       - url_not_contains: /login
       - cookie: { name: sid, domain: example.com }
 `));
-    expect(c.login?.successWhen).toEqual({ type: 'url_not_contains', pattern: '/login' });
+    expect(c.login?.successWhen).toEqual([
+      { type: 'url_not_contains', pattern: '/login' },
+      { type: 'cookie', name: 'sid', domain: 'example.com' },
+    ]);
   });
 
   it('reads qr_selector from top level, and prefers the one inside login', () => {

@@ -1,6 +1,21 @@
 // API client for the admin backend.
 // All admin routes are same-origin behind nginx (or the Vite dev proxy),
 // so cookies travel with credentials: 'include'.
+//
+// 所有请求经 http.ts 的通用包装：
+// - 403 STEP_UP_REQUIRED → 弹二次验证框，成功后自动重试一次
+// - 401（会话丢失）→ 通知 App 回到登录页
+
+import { startAuthentication, startRegistration } from '@simplewebauthn/browser'
+import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+} from '@simplewebauthn/browser'
+import { ApiError, createRequester, createStepUpGate } from './http'
+import type { CookieItem } from './cookies'
+import type { ScreenStatus } from './screen'
+
+export { ApiError } from './http'
 
 export interface Connection {
   id: string
@@ -35,82 +50,165 @@ export interface Envelope {
   warnings: string[]
 }
 
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string | undefined,
-    message: string,
-  ) {
-    super(message)
+export interface AuthStatus {
+  hasUser: boolean
+  authenticated: boolean
+  stepUp: boolean
+  totpEnabled: boolean
+  passkeyCount: number
+}
+
+export interface Passkey {
+  id: string
+  createdAt: string
+}
+
+export interface ScreenStatusBody {
+  status: ScreenStatus
+  reason?: string
+  since: string | number
+}
+
+export interface CookieImportResult {
+  logged_in: boolean
+  cookies: { name: string; domain: string }[]
+}
+
+export interface ProbeResult {
+  connectionId: string
+  status: string
+  reason?: string
+}
+
+// ── 会话丢失与二次验证的接线点 ────────────────────────────────────────────
+
+const stepUpGate = createStepUpGate()
+const sessionLostListeners = new Set<(err: ApiError) => void>()
+
+/** 由 StepUpDialog 挂载时注册：返回 true 表示验证通过 */
+export function setStepUpPrompt(prompt: (() => Promise<boolean>) | null): void {
+  stepUpGate.setPrompt(prompt)
+}
+
+/** App 订阅：任何后台请求返回 401（会话丢失）时触发 */
+export function onSessionLost(listener: (err: ApiError) => void): () => void {
+  sessionLostListeners.add(listener)
+  return () => {
+    sessionLostListeners.delete(listener)
   }
 }
 
-async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const resp = await fetch(path, {
-    ...init,
-    credentials: 'include',
-    headers: {
-      ...(init.body !== undefined ? { 'content-type': 'application/json' } : {}),
-      ...(init.headers ?? {}),
-    },
-  })
-  const text = await resp.text()
-  let body: unknown = null
-  try {
-    body = text ? JSON.parse(text) : null
-  } catch {
-    body = text
-  }
-  if (!resp.ok) {
-    const b = body as { code?: string; message?: string; error?: string } | null
-    throw new ApiError(resp.status, b?.code, b?.message ?? b?.error ?? text ?? resp.statusText)
-  }
-  return body as T
-}
+const call = createRequester({
+  fetch: (input, init) => fetch(input, init),
+  stepUp: () => stepUpGate.request(),
+  onSessionLost: (err) => {
+    for (const l of sessionLostListeners) l(err)
+  },
+})
+
+const enc = encodeURIComponent
 
 export const api = {
   // ── connections ──
   listConnections: () => call<{ connections: Connection[] }>('/admin/connections'),
   createConnection: (input: { connector_id: string; label: string; config: Record<string, unknown> }) =>
-    call<Connection>('/admin/connections', { method: 'POST', body: JSON.stringify(input) }),
+    call<Connection>('/admin/connections', { method: 'POST', body: input }),
   deleteConnection: (id: string) =>
-    call<{ ok: boolean }>(`/admin/connections/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    call<{ ok: boolean }>(`/admin/connections/${enc(id)}`, { method: 'DELETE' }),
 
   // ── capabilities ──
   listCapabilities: (connectorId: string) =>
-    call<{ capabilities: Capability[] }>(
-      `/admin/capabilities?connector_id=${encodeURIComponent(connectorId)}`,
-    ),
+    call<{ capabilities: Capability[] }>(`/admin/capabilities?connector_id=${enc(connectorId)}`),
 
   // ── invoke ──
   invoke: (input: { connection_id: string; capability_id: string; input?: unknown; no_cache?: boolean }) =>
-    call<Envelope>('/api/invoke', { method: 'POST', body: JSON.stringify(input) }),
+    call<Envelope>('/api/invoke', { method: 'POST', body: input }),
 
-  // ── browser remote screen ──
-  openScreen: (connectionId: string, url: string, qrSelector?: string) =>
-    call<{ ticket: string; ws_path: string }>(
-      `/admin/screen/${encodeURIComponent(connectionId)}/open`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ url, ...(qrSelector !== undefined ? { qr_selector: qrSelector } : {}) }),
-      },
-    ),
-  stopScreen: (connectionId: string) =>
-    call<{ ok: boolean }>(`/admin/screen/${encodeURIComponent(connectionId)}/stop`, {
+  // ── browser remote screen（登录页地址由 server 从清单 login.url 取）──
+  openScreen: (connectionId: string) =>
+    call<{ ticket: string; ws_path: string }>(`/admin/screen/${enc(connectionId)}/open`, {
       method: 'POST',
+      body: {},
     }),
+  stopScreen: (connectionId: string) =>
+    call<{ ok: boolean }>(`/admin/screen/${enc(connectionId)}/stop`, { method: 'POST' }),
+  screenStatus: (connectionId: string) =>
+    call<ScreenStatusBody>(`/admin/screen/${enc(connectionId)}/status`),
 
   // ── login state ──
-  startLogin: (connectionId: string, url: string, qrSelector?: string) =>
-    call<{ stream_token: string }>('/admin/login/start', {
+  importCookies: (connectionId: string, cookies: CookieItem[]) =>
+    call<CookieImportResult>(`/admin/connections/${enc(connectionId)}/cookies`, {
       method: 'POST',
-      body: JSON.stringify({ connection_id: connectionId, url, ...(qrSelector !== undefined ? { qr_selector: qrSelector } : {}) }),
+      body: { cookies },
     }),
-  stopLogin: (connectionId: string) =>
-    call<{ ok: boolean }>(`/admin/login/${encodeURIComponent(connectionId)}/stop`, { method: 'POST' }),
+  probe: (connectionId: string) =>
+    call<ProbeResult>(`/admin/probe/${enc(connectionId)}`, { method: 'POST' }),
+  probeStatus: () =>
+    call<{ lastRunAt: string | null; lastResults: ProbeResult[] }>('/admin/probe/status'),
 
   // ── health ──
   health: () => call<{ ok: boolean; time: string }>('/health'),
+}
+
+export const authApi = {
+  status: () => call<AuthStatus>('/auth/status', { stepUp: false, sessionLost: false }),
+  bootstrap: (username: string, password: string) =>
+    call<{ id: string; expiresAt: string }>('/auth/bootstrap', {
+      method: 'POST',
+      body: { username, password },
+      stepUp: false,
+      sessionLost: false,
+    }),
+  login: (input: { username: string; password: string; totp?: string }) =>
+    call<{ ok: boolean; expiresAt: string }>('/auth/login', {
+      method: 'POST',
+      body: input,
+      stepUp: false,
+      sessionLost: false,
+    }),
+  logout: () =>
+    call<{ ok: boolean }>('/auth/logout', { method: 'POST', stepUp: false, sessionLost: false }),
+
+  // ── 二次验证（自身不能再走 step-up 包装）──
+  async stepUpPasskey(): Promise<void> {
+    const optionsJSON = await call<PublicKeyCredentialRequestOptionsJSON>('/auth/step-up/passkey/begin', {
+      method: 'POST',
+      stepUp: false,
+    })
+    const response = await startAuthentication({ optionsJSON })
+    await call<{ ok: boolean }>('/auth/step-up/passkey/finish', {
+      method: 'POST',
+      body: { response },
+      stepUp: false,
+    })
+  },
+  stepUpTotp: (code: string) =>
+    call<{ ok: boolean }>('/auth/step-up/totp', { method: 'POST', body: { code }, stepUp: false }),
+
+  // ── passkeys ──
+  listPasskeys: () => call<{ passkeys: Passkey[] }>('/auth/passkeys'),
+  async registerPasskey(): Promise<void> {
+    const optionsJSON = await call<PublicKeyCredentialCreationOptionsJSON>('/auth/passkeys/register/begin', {
+      method: 'POST',
+    })
+    const response = await startRegistration({ optionsJSON })
+    await call<{ ok: boolean }>('/auth/passkeys/register/finish', {
+      method: 'POST',
+      body: { response },
+    })
+  },
+  deletePasskey: (id: string) => call<{ ok: boolean }>(`/auth/passkeys/${enc(id)}`, { method: 'DELETE' }),
+
+  // ── TOTP ──
+  // 已启用时重新 enroll 需要二次验证（§8.2 重新绑定），由通用包装弹框处理
+  enrollTotp: () =>
+    call<{ secretBase32: string; otpauthUrl: string; enabled: boolean }>('/auth/totp/enroll', {
+      method: 'POST',
+    }),
+  confirmTotp: (code: string) =>
+    call<{ ok: boolean; totpEnabled: boolean }>('/auth/totp/confirm', { method: 'POST', body: { code } }),
+  disableTotp: (code: string) =>
+    call<{ ok: boolean; totpEnabled: boolean }>('/auth/totp/disable', { method: 'POST', body: { code } }),
 }
 
 /** Open the screencast websocket for a connection and return the socket. */

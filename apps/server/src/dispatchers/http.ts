@@ -12,6 +12,16 @@ interface HttpExecResult {
   body: unknown
 }
 
+/**
+ * §6.1: UPSTREAM_ERROR is retryable for a site 5xx and not for a 4xx. Any
+ * other status leaves it unjudged, which err() treats as retryable.
+ */
+function upstreamRetryable(status: number): { retryable?: boolean } {
+  if (status >= 500) return { retryable: true }
+  if (status >= 400) return { retryable: false }
+  return {}
+}
+
 export async function dispatchHttp(
   connection: Connection,
   capability: Capability,
@@ -50,7 +60,7 @@ export async function dispatchHttp(
     const rendered = renderTemplate(manifestHttp.base, tplCtx, { urlEncodeInput: true })
     url = rendered.value
   } catch (e) {
-    return fail(err('INVALID_INPUT', `URL template error: ${(e as Error).message}`), source)
+    return fail(err('INVALID_PARAMS', `URL template error: ${(e as Error).message}`), source)
   }
 
   // ── Execute HTTP request ─────────────────────────────────────────────────
@@ -67,7 +77,7 @@ export async function dispatchHttp(
     result = { status: resp.status, body }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    const code = msg.includes('timeout') || msg.includes('abort') ? 'TIMEOUT' : 'UPSTREAM_ERROR'
+    const code = msg.includes('timeout') || msg.includes('abort') ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_ERROR'
     return fail(err(code, `HTTP request failed: ${msg}`), source)
   }
 
@@ -77,17 +87,20 @@ export async function dispatchHttp(
   if (authFailedWhen) {
     const authResult = evalExpr(authFailedWhen, exprCtx)
     if (authResult.value) {
-      return fail(err('AUTH_FAILED', 'Site rejected credentials (401/403)'), source)
+      return fail(err('AUTH_REJECTED', 'Site rejected credentials (401/403)'), source)
     }
   }
 
   if (successWhen) {
     const successResult = evalExpr(successWhen, exprCtx)
     if (!successResult.value) {
-      return fail(err('UPSTREAM_ERROR', `Success condition not met: status=${result.status}`), source)
+      return fail(
+        err('UPSTREAM_ERROR', `Success condition not met: status=${result.status}`, upstreamRetryable(result.status)),
+        source,
+      )
     }
   } else if (result.status >= 400) {
-    return fail(err('UPSTREAM_ERROR', `HTTP ${result.status}`), source)
+    return fail(err('UPSTREAM_ERROR', `HTTP ${result.status}`, upstreamRetryable(result.status)), source)
   }
 
   // ── Map output fields ────────────────────────────────────────────────────

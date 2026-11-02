@@ -1,11 +1,13 @@
-// apps/server entry point — minimal M0 skeleton that wires all packages together
-// and exposes three entry points: REST, MCP (Streamable HTTP), and admin backend.
+// apps/server entry point — wires all packages together and exposes three
+// entry points: REST, MCP (Streamable HTTP), and the admin backend.
 
 import Fastify from 'fastify';
+import type { RouteOptions } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { randomBytes, createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DbClient } from '@webridge/db';
 import { Vault } from '@webridge/vault';
 import { redact } from '@webridge/vault';
@@ -15,21 +17,30 @@ import type {
   CacheStore, AuditStore, CachedResult,
 } from '@webridge/core';
 import { invoke } from '@webridge/core';
-import type { Capability, Connection, Client, Grant } from '@webridge/core';
+import type { Capability, Connection, Client, ClientKind, Grant, SupportState } from '@webridge/core';
 import { registerMcpRoutes } from './routes/mcp.js';
 import { registerRestRoutes } from './routes/rest.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerScreenRoutes } from './routes/screen.js';
+import { registerClientApiRoutes } from './routes/client-api.js';
+import { registerProbeRoutes } from './routes/probe.js';
 import { createAuthService } from './auth/service.js';
-import { SESSION_COOKIE } from './auth/guard.js';
-import { openScreencastUpstream, startLogin, stopLogin } from './dispatchers/browser.js';
+import { SESSION_COOKIE, createAdminGate } from './auth/guard.js';
+import { createBrowserClient } from './browser-client.js';
+import type { BrowserClient } from './browser-client.js';
 import { ConnectorRegistry } from './registry.js';
 import { UnifiedDispatcher } from './dispatchers/index.js';
+import { ProbeScheduler, DEFAULT_PROBE_INTERVAL_MS } from './probe/scheduler.js';
+import type { ProbeTarget } from './probe/scheduler.js';
+import { createStateWriter } from './state-writer.js';
+import type { StateWriterFn } from './state-writer.js';
+import { readSecret } from './secrets.js';
 
 const PORT = parseInt(process.env['PORT'] ?? '3000', 10);
 const DB_PATH = process.env['DB_PATH'] ?? './webridge.db';
 const LOG_LEVEL = process.env['LOG_LEVEL'] ?? 'info';
+const PROBE_INTERVAL_MS = parseInt(process.env['WEBRIDGE_PROBE_INTERVAL_MS'] ?? '', 10) || DEFAULT_PROBE_INTERVAL_MS;
 
 // Master key resolution: env var → file path env var → ephemeral (dev only)
 function resolveMasterKey(): string {
@@ -49,8 +60,89 @@ function resolveMasterKey(): string {
 
 const MASTER_KEY = resolveMasterKey();
 
-export async function buildServer() {
-  const db = new DbClient(DB_PATH);
+// ── Startup restore ────────────────────────────────────────────────────────
+
+/**
+ * JSON columns come back parsed from drizzle, but rows written before the
+ * schema default was fixed hold a JSON string ('"{}"'), so parse once more.
+ */
+function jsonColumn(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  const v = jsonColumn(value);
+  return typeof v === 'object' && v !== null && !Array.isArray(v) ? v as Record<string, unknown> : {};
+}
+
+function asStringArray(value: unknown): string[] {
+  const v = jsonColumn(value);
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+/**
+ * Fill the in-memory maps that invoke() reads from the DB, so client tokens,
+ * grants and connections survive a restart. Revoked clients are loaded too:
+ * invoke() needs them to answer CLIENT_REVOKED instead of UNAUTHENTICATED.
+ */
+async function restoreState(
+  db: DbClient,
+  connectionMap: Map<string, Connection>,
+  clientMap: Map<string, Client>,
+  grantMap: Map<string, Grant[]>,
+): Promise<void> {
+  const [connections, clients, grants] = await Promise.all([
+    db.listConnections(),
+    db.listClients(),
+    db.listGrants(),
+  ]);
+  for (const row of connections) {
+    connectionMap.set(row.id, {
+      id: row.id,
+      connector_id: row.connector_id,
+      label: row.label,
+      config: asRecord(row.config),
+      capability_states: asRecord(row.capability_states) as Record<string, SupportState>,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    });
+  }
+  for (const row of clients) {
+    const client: Client & { token_hash: string } = {
+      id: row.id,
+      label: row.label,
+      kind: row.kind as ClientKind,
+      token_hash: row.token_hash,
+      revoked: row.revoked,
+      created_at: row.created_at,
+    };
+    clientMap.set(row.id, client);
+  }
+  for (const row of grants) {
+    const list = grantMap.get(row.client_id) ?? [];
+    list.push({
+      client_id: row.client_id,
+      connection_id: row.connection_id,
+      capabilities: asStringArray(row.capabilities),
+    });
+    grantMap.set(row.client_id, list);
+  }
+}
+
+export interface BuildServerOptions {
+  /** SQLite file; defaults to the DB_PATH env var. */
+  dbPath?: string;
+  /** Called for every route as it is registered (tests use it to enumerate routes). */
+  onRoute?: (route: RouteOptions) => void;
+}
+
+export async function buildServer(options: BuildServerOptions = {}) {
+  const db = new DbClient(options.dbPath ?? DB_PATH);
   const vault = new Vault(MASTER_KEY);
 
   // ── Connector registry — loads YAML manifests from connectors/ dir ────────
@@ -64,6 +156,7 @@ export async function buildServer() {
   const connectionMap = new Map<string, Connection>();
   const clientMap = new Map<string, Client>();
   const grantMap = new Map<string, Grant[]>();
+  await restoreState(db, connectionMap, clientMap, grantMap);
 
   // ── Service implementations ───────────────────────────────────────────────
 
@@ -120,7 +213,19 @@ export async function buildServer() {
     },
   };
 
-  const unifiedDispatcher = new UnifiedDispatcher(connectorRegistry);
+  // ── Browser client (§13.1 RPC) ────────────────────────────────────────────
+  const browserRpcUrl = (process.env['BROWSER_RPC_URL'] ?? 'http://browser:4000').replace(/\/$/, '');
+  const browserRpcSecret = readSecret('BROWSER_RPC_SECRET') ?? '';
+  const browserClient: BrowserClient = createBrowserClient({
+    baseUrl: browserRpcUrl,
+    secret: browserRpcSecret,
+  });
+
+  // ── Unified dispatcher (now takes BrowserClient) ──────────────────────────
+  const stateWriter = createStateWriter(connectionMap, db, (connectorId) =>
+    connectorRegistry.listCapabilities(connectorId),
+  );
+  const unifiedDispatcher = new UnifiedDispatcher(connectorRegistry, browserClient);
   const dispatcher = {
     dispatch: (connection: Connection, capability: Capability, input: unknown) =>
       unifiedDispatcher.dispatch(connection, capability, input),
@@ -145,6 +250,50 @@ export async function buildServer() {
 
   // ── Fastify server ─────────────────────────────────────────────────────────
   const app = Fastify({ logger: { level: process.env['VITEST'] ? 'error' : LOG_LEVEL } });
+  if (options.onRoute !== undefined) app.addHook('onRoute', options.onRoute);
+
+  // ── Probe scheduler (§4.4.3, §4.5) ────────────────────────────────────────
+  // Resolves probe targets only for browser-transport connections with login.
+  const probeScheduler = new ProbeScheduler({
+    db,
+    connectionMap,
+    probe: async (connectionId, capabilityId) => {
+      const conn = connectionMap.get(connectionId);
+      if (!conn) return { status: 'not_found', reason: 'connection not found' };
+      const login = connectorRegistry.getLogin(conn.connector_id);
+      if (!login) return { status: 'skipped', reason: 'no login block' };
+      const result = await browserClient.probe({
+        connection_id: connectionId,
+        login_url: login.url,
+        success_when: login.successWhen,
+        ...(login.whoami !== undefined ? { whoami: login.whoami } : {}),
+      });
+      return result;
+    },
+    resolveTarget: (connection): ProbeTarget | undefined => {
+      const login = connectorRegistry.getLogin(connection.connector_id);
+      if (!login || !login.whoami) return undefined;
+      const caps = connectorRegistry.listCapabilities(connection.connector_id);
+      return { whoami: login.whoami, capabilities: caps.map((c) => c.id) };
+    },
+    audit: (entry) => auditStore.append({
+      client_id: undefined,
+      action: entry.action,
+      target: entry.target,
+      detail: entry.detail,
+    }),
+    intervalMs: PROBE_INTERVAL_MS,
+  });
+
+  // Start probe scheduler only in production; tests control it explicitly.
+  app.addHook('onReady', async () => {
+    if (!process.env['VITEST']) probeScheduler.start();
+  });
+
+  app.addHook('onClose', async () => {
+    probeScheduler.stop();
+    await db.close();
+  });
 
   // Health check
   app.get('/health', async () => ({ ok: true, time: new Date().toISOString() }));
@@ -162,9 +311,20 @@ export async function buildServer() {
   });
   await registerAuthRoutes(app, { auth: authService, db });
 
+  // §8.4: every /admin/* route needs an admin session, and the sensitive ones
+  // a recent step-up. One root-level hook (after the cookie parser) covers
+  // every route module, including ones added later.
+  app.addHook('onRequest', createAdminGate(authService));
+
   // Register route modules
   await registerRestRoutes(app, { services, invokeOpts, db, vault });
   await registerMcpRoutes(app, { services, invokeOpts });
+  await registerClientApiRoutes(app, {
+    auth: authStore,
+    connections: connStore,
+    hashToken: invokeOpts.hashToken,
+    listCapabilities: (connectorId) => connectorRegistry.listCapabilities(connectorId),
+  });
   await registerAdminRoutes(app, {
     db,
     vault,
@@ -172,6 +332,13 @@ export async function buildServer() {
     clientMap,
     grantMap,
     connectorRegistry,
+    browserClient,
+    audit: (entry) => auditStore.append({
+      client_id: entry.client_id,
+      action: entry.action,
+      target: entry.target,
+      detail: entry.detail,
+    }),
   });
 
   // Remote screen forwarding (design §4.4.5: screen only through the server).
@@ -188,10 +355,37 @@ export async function buildServer() {
       if (sessionId === undefined) return false;
       return authService.hasStepUp(sessionId);
     },
-    startLogin,
-    stopLogin,
-    audit: (entry) => auditStore.append({ client_id: entry.client_id, action: entry.action, target: entry.target, detail: entry.detail }),
-    openUpstream: openScreencastUpstream,
+    browserClient: {
+      startLogin: (req) => {
+        const { success_when, ...rest } = req;
+        return browserClient.startLogin({
+          ...rest,
+          success_when: success_when as unknown as import('./browser-client.js').LoginCondition[],
+        });
+      },
+      stopLogin: (connectionId) => browserClient.stopLogin(connectionId),
+      loginStatus: (connectionId) => browserClient.loginStatus(connectionId),
+      openScreencast: (streamToken) => browserClient.openScreencast(streamToken),
+    },
+    connectionMap,
+    getLogin: (connectorId) => connectorRegistry.getLogin(connectorId),
+    audit: (entry) => auditStore.append({
+      client_id: entry.client_id,
+      action: entry.action,
+      target: entry.target,
+      detail: entry.detail,
+    }),
+  });
+
+  // Probe routes (design §4.4.3).
+  await registerProbeRoutes(app, {
+    scheduler: probeScheduler,
+    requireAdmin: async (request) => {
+      const sessionId = request.cookies[SESSION_COOKIE];
+      if (sessionId === undefined) return false;
+      const session = await authService.getSession(sessionId);
+      return session !== null;
+    },
   });
 
   // Admin web UI (built by apps/web). Served from the server so nginx only
@@ -212,8 +406,15 @@ export async function buildServer() {
   return { app, db, vault, services, invokeOpts, connectorRegistry };
 }
 
-// ── Start ──────────────────────────────────────────────────────────────────
+// ── Start only when this module is the entry point ─────────────────────────
+// Tests import buildServer(); importing must not bind a port.
 
-const { app } = await buildServer();
-await app.listen({ port: PORT, host: '0.0.0.0' });
-console.log(`webridge-server listening on port ${PORT}`);
+const entryArg = process.argv[1];
+const isMain =
+  entryArg !== undefined && import.meta.url === pathToFileURL(resolve(entryArg)).href;
+
+if (isMain) {
+  const { app } = await buildServer();
+  await app.listen({ port: PORT, host: '0.0.0.0' });
+  console.log(`webridge-server listening on port ${PORT}`);
+}

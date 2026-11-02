@@ -3,7 +3,8 @@
 // Design doc §3.2.1: x-* keywords carried through here.
 
 import type { SupportState } from '../types/index.js';
-import type { ApiError, ErrorCode } from '../errors/index.js';
+import { CODE_CLASSIFICATION } from '../errors/index.js';
+import type { ApiError, EnvelopeStatus } from '../errors/index.js';
 
 /** Field-level status, parallel to output schema. */
 export type FieldStatus =
@@ -25,6 +26,12 @@ export interface FieldMeta {
 }
 
 export interface ResultEnvelope<T = unknown> {
+  /**
+   * §6 status: ok on success, partial on partial, and on error the status
+   * CODE_CLASSIFICATION assigns to error.code (needs_reauth, forbidden, ...).
+   * The CLI exit code is EXIT_CODE[status].
+   */
+  status: EnvelopeStatus;
   /** success | error | partial */
   outcome: 'success' | 'error' | 'partial';
   /** data if outcome is success/partial, null on error */
@@ -57,6 +64,7 @@ export function ok<T>(
   opts: Partial<Pick<ResultEnvelope, 'fields' | 'data_time' | 'cache' | 'warnings'>> = {},
 ): ResultEnvelope<T> {
   return {
+    status: 'ok',
     outcome: 'success',
     data,
     error: null,
@@ -76,6 +84,7 @@ export function fail(
   opts: Partial<Pick<ResultEnvelope, 'fields' | 'warnings'>> = {},
 ): ResultEnvelope {
   return {
+    status: CODE_CLASSIFICATION[error.code].status,
     outcome: 'error',
     data: null,
     error,
@@ -96,6 +105,7 @@ export function partial<T>(
   opts: Partial<Pick<ResultEnvelope, 'fields' | 'data_time' | 'cache' | 'warnings'>> = {},
 ): ResultEnvelope<T> {
   return {
+    status: 'partial',
     outcome: 'partial',
     data,
     error,

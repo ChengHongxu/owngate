@@ -1,8 +1,7 @@
 import { Command } from 'commander'
 import * as readline from 'node:readline'
 import { writeConfig, readConfig } from '../config.js'
-import { adminCall } from '../http.js'
-import type { Connection } from '@webridge/core'
+import { listGrantedConnections } from './conn.js'
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
@@ -21,10 +20,10 @@ export const loginCommand = new Command('login')
       const server = await prompt('Server URL: ')
       const token = await prompt('Bearer token: ')
       writeConfig({ server, token })
-      // Verify by calling GET /admin/connections
-      const data = (await adminCall('/admin/connections')) as { connections: Connection[] }
-      const count = data.connections?.length ?? 0
-      console.log(`Logged in. Found ${count} connection(s).`)
+      // Verify the token against the client-token API (/admin/* needs an
+      // admin session and would always refuse a CLI token).
+      const count = (await listGrantedConnections()).length
+      console.log(`Logged in. ${count} connection(s) granted to this token.`)
     } catch (e) {
       console.error('Login failed:', (e as Error).message)
       process.exit(1)

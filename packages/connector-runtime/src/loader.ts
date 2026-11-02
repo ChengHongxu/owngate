@@ -17,7 +17,7 @@ export type LoginCondition =
 /** Remote-login settings from the manifest `login:` block — design doc §4.4.3. */
 export interface LoginConfig {
   url: string;
-  successWhen: LoginCondition;
+  successWhen: LoginCondition[];
   whoami?: string;
   allowedDomains?: string[];
   qrSelector?: string;
@@ -340,9 +340,10 @@ function parseLogin(v: unknown, rootQrSelector: unknown): LoginConfig {
   if (!Array.isArray(any) || any.length === 0) {
     throw new Error('manifest.login.success_when.any must be a non-empty array');
   }
-  // Validate every entry so typos surface at load time; only the first is used (M1).
+  // Validate every entry so typos surface at load time; every condition is kept
+  // (design §4.4.3: "保留 any 里全部条件，现在只取第一条，其余被丢" → now keep all).
   const conditions = any.map((c, i) => parseLoginCondition(c, `manifest.login.success_when.any[${i}]`));
-  const successWhen = conditions[0] as LoginCondition;
+  const successWhen = conditions;
 
   const whoami = optionalString(login['whoami'], 'manifest.login.whoami');
 

@@ -1,6 +1,8 @@
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { api, type Envelope } from '../lib/api'
+import { api, type CookieImportResult, type Envelope } from '../lib/api'
+import { describeAuthError } from '../lib/http'
+import { parseCookieJson, type CookieItem } from '../lib/cookies'
 import { StatusBadge } from '../components/StatusBadge'
 
 export function ConnectionDetailPage({
@@ -29,6 +31,13 @@ export function ConnectionDetailPage({
     onSuccess: (env, capabilityId) => setLast({ capability: capabilityId, env }),
   })
 
+  // 浏览器类连接：有远程登录、cookie 导入与登录态探测
+  const isBrowser =
+    conn !== undefined &&
+    (conn.connector_id.startsWith('bilibili') ||
+      conn.connector_id === 'xiaohongshu' ||
+      (capabilities.data?.capabilities.some((c) => c.transport === 'browser') ?? false))
+
   if (connections.isPending) return <p className="muted">正在读取…</p>
   if (!conn) {
     return (
@@ -48,12 +57,14 @@ export function ConnectionDetailPage({
           <h1>{conn.label}</h1>
           <p className="muted small">{conn.connector_id} · {conn.id}</p>
         </div>
-        {conn.connector_id.startsWith('bilibili') || conn.connector_id === 'xiaohongshu' ? (
+        {isBrowser ? (
           <button className="primary" onClick={() => onOpenScreen(id)}>
             打开远程登录
           </button>
         ) : null}
       </div>
+
+      {isBrowser && <LoginStateSection id={id} />}
 
       <h2>能力</h2>
       {capabilities.isPending && <p className="muted">正在读取能力…</p>}
@@ -118,5 +129,109 @@ export function ConnectionDetailPage({
         </div>
       )}
     </section>
+  )
+}
+
+function LoginStateSection({ id }: { id: string }) {
+  const qc = useQueryClient()
+  const [text, setText] = useState('')
+  const [localError, setLocalError] = useState('')
+  const [imported, setImported] = useState<CookieImportResult | null>(null)
+
+  const refreshConnections = () => void qc.invalidateQueries({ queryKey: ['connections'] })
+
+  const probe = useMutation({
+    mutationFn: () => api.probe(id),
+    onSuccess: refreshConnections,
+  })
+
+  const importCookies = useMutation({
+    mutationFn: (cookies: CookieItem[]) => api.importCookies(id, cookies),
+    onSuccess: (r) => {
+      // 导入成功后清掉输入框，cookie 值不在页面上停留
+      setText('')
+      setImported(r)
+      refreshConnections()
+    },
+  })
+
+  return (
+    <>
+      <h2>登录态</h2>
+      <div className="card">
+        <div className="card-row">
+          <div>
+            <p className="card-title">检测登录态</p>
+            <p className="muted small">用该连接的浏览器 profile 检查是否仍处于登录状态。</p>
+          </div>
+          <button onClick={() => probe.mutate()} disabled={probe.isPending}>
+            {probe.isPending ? '检测中…' : '立即检测登录态'}
+          </button>
+        </div>
+        {probe.data && (
+          <div className="card-row">
+            <StatusBadge status={probe.data.status} />
+            {probe.data.reason && <p className="muted small">{probe.data.reason}</p>}
+          </div>
+        )}
+        {probe.isError && <p className="error-text">检测失败：{describeAuthError(probe.error)}</p>}
+      </div>
+
+      <form
+        className="card form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          setLocalError('')
+          setImported(null)
+          const parsed = parseCookieJson(text)
+          if (!parsed.ok) return setLocalError(parsed.error)
+          importCookies.mutate(parsed.cookies)
+        }}
+      >
+        <div>
+          <p className="card-title">导入 cookie</p>
+          <p className="muted small">
+            适合服务器登录会触发异地验证的站点：在自己电脑上登录后用浏览器扩展导出 cookie（JSON 数组），粘贴到这里。需要二次验证。
+          </p>
+        </div>
+        <label>
+          cookie JSON
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={6}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder='[{"name": "SESSDATA", "value": "…", "domain": ".bilibili.com", "path": "/"}]'
+          />
+        </label>
+        {localError && <p className="error-text">{localError}</p>}
+        {importCookies.isError && (
+          <p className="error-text">导入失败：{describeAuthError(importCookies.error)}</p>
+        )}
+        {imported && (
+          <div>
+            <p className={imported.logged_in ? 'card-title status-ok-text' : 'card-title'}>
+              {imported.logged_in ? '✓ 已识别为登录状态' : '已导入，但未识别为登录状态'}
+            </p>
+            {!imported.logged_in && (
+              <p className="muted small">下一步：确认导出时已登录，且包含清单声明的登录 cookie。</p>
+            )}
+            <ul className="plain-list small">
+              {imported.cookies.map((c) => (
+                <li key={`${c.domain}|${c.name}`} className="mono">
+                  {c.name} <span className="muted">· {c.domain}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="card-actions">
+          <button className="primary" type="submit" disabled={importCookies.isPending}>
+            {importCookies.isPending ? '导入中…' : '导入'}
+          </button>
+        </div>
+      </form>
+    </>
   )
 }

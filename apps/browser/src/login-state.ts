@@ -46,11 +46,20 @@ export class LoginStateTracker {
     return { attemptId: attempt.id, signal: attempt.controller.signal }
   }
 
-  /** Record a wait's outcome. Ignored when the attempt was superseded or stopped. */
-  settle(connectionId: string, attemptId: number, result: LoginResult): void {
-    if (this.attempts.get(connectionId)?.id !== attemptId) return
+  /**
+   * Record a wait's outcome. Ignored when the attempt was superseded or
+   * stopped; returns whether it was recorded.
+   */
+  settle(connectionId: string, attemptId: number, result: LoginResult): boolean {
+    if (this.attempts.get(connectionId)?.id !== attemptId) return false
     this.attempts.delete(connectionId)
     this.set(connectionId, result.success ? 'success' : 'timeout', result.reason)
+    return true
+  }
+
+  /** A login wait is running for this connection. */
+  isPending(connectionId: string): boolean {
+    return this.attempts.has(connectionId)
   }
 
   /** Success observed outside a wait (cookie import). Ends any pending wait. */
@@ -93,33 +102,55 @@ export class LoginStateTracker {
   }
 }
 
+/** Upper bound on conditions in one success_when; manifests need a handful. */
+export const MAX_LOGIN_CONDITIONS = 20
+
 /**
- * Validate a `success_when` from an RPC body. Shape matches waitForLogin's
- * LoginCondition; the server translates the manifest's `any: [...]` form.
+ * Validate a `success_when` from an RPC body: a non-empty array of conditions,
+ * any one of which proves login (design §13.1). The server translates the
+ * manifest's `any: [...]` form into this array.
  */
+export function parseLoginConditions(
+  input: unknown,
+): { ok: true; conditions: LoginCondition[] } | { ok: false; error: string } {
+  if (!Array.isArray(input)) return { ok: false, error: 'success_when must be an array' }
+  if (input.length === 0) return { ok: false, error: 'success_when must not be empty' }
+  if (input.length > MAX_LOGIN_CONDITIONS) {
+    return { ok: false, error: `success_when has more than ${MAX_LOGIN_CONDITIONS} conditions` }
+  }
+  const conditions: LoginCondition[] = []
+  for (const [i, raw] of input.entries()) {
+    const parsed = parseLoginCondition(raw)
+    if (!parsed.ok) return { ok: false, error: `success_when[${i}]: ${parsed.error}` }
+    conditions.push(parsed.condition)
+  }
+  return { ok: true, conditions }
+}
+
+/** Validate one condition of a `success_when` array. */
 export function parseLoginCondition(
   input: unknown,
 ): { ok: true; condition: LoginCondition } | { ok: false; error: string } {
   if (typeof input !== 'object' || input === null) {
-    return { ok: false, error: 'success_when must be an object' }
+    return { ok: false, error: 'condition must be an object' }
   }
   const c = input as Record<string, unknown>
   if (c['type'] === 'cookie') {
     const name = c['name']
     const domain = c['domain']
     if (!isNonEmpty(name) || !isNonEmpty(domain)) {
-      return { ok: false, error: 'success_when cookie needs non-empty name and domain' }
+      return { ok: false, error: 'cookie condition needs non-empty name and domain' }
     }
     return { ok: true, condition: { type: 'cookie', name, domain } }
   }
   if (c['type'] === 'url_not_contains') {
     const pattern = c['pattern']
     if (!isNonEmpty(pattern)) {
-      return { ok: false, error: 'success_when url_not_contains needs a non-empty pattern' }
+      return { ok: false, error: 'url_not_contains condition needs a non-empty pattern' }
     }
     return { ok: true, condition: { type: 'url_not_contains', pattern } }
   }
-  return { ok: false, error: "success_when.type must be 'cookie' or 'url_not_contains'" }
+  return { ok: false, error: "type must be 'cookie' or 'url_not_contains'" }
 }
 
 function isNonEmpty(v: unknown): v is string {

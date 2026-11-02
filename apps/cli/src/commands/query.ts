@@ -1,7 +1,8 @@
 import { Command } from 'commander'
 import pc from 'picocolors'
 import { apiCall } from '../http.js'
-import type { ResultEnvelope } from '@webridge/core'
+import { ERROR_TEXT, EXIT_CODE, USAGE_EXIT_CODE } from '@webridge/core'
+import type { ErrorCode, ResultEnvelope } from '@webridge/core'
 
 export const queryCommand = new Command('query')
   .description('Invoke a capability')
@@ -17,7 +18,7 @@ export const queryCommand = new Command('query')
         const eq = p.indexOf('=')
         if (eq === -1) {
           console.error(`Invalid param "${p}" — expected k=v format`)
-          process.exit(1)
+          process.exit(USAGE_EXIT_CODE)
         }
         input[p.slice(0, eq)] = p.slice(eq + 1)
       }
@@ -33,7 +34,7 @@ export const queryCommand = new Command('query')
 
       if (opts.json) {
         console.log(JSON.stringify(envelope, null, 2))
-        if (envelope.outcome === 'error') process.exit(1)
+        if (envelope.outcome !== 'success') process.exit(EXIT_CODE[envelope.status])
         return
       }
 
@@ -63,7 +64,15 @@ export const queryCommand = new Command('query')
 
       if (envelope.outcome === 'error' && envelope.error) {
         console.error(pc.red(`Error [${envelope.error.code}]: ${envelope.error.message}`))
-        process.exit(1)
+        // §6.1 ERROR_TEXT next_step is generic; the envelope message is specific
+        // (includes connection name, site reason, ...), so prefer it when present.
+        const code = envelope.error.code as ErrorCode
+        const text = ERROR_TEXT[code]
+        if (text && text.next_step) {
+          console.error(`${text.next_step}`)
+        }
+        const exitCode = code === 'INVALID_PARAMS' ? USAGE_EXIT_CODE : EXIT_CODE[envelope.status]
+        process.exit(exitCode)
       }
 
       if (envelope.data !== null) {

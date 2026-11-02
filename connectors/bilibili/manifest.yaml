@@ -1,0 +1,38 @@
+connector: bilibili
+version: 0.1.0
+title: 哔哩哔哩
+access: browser
+
+login:
+  url: https://passport.bilibili.com/login
+  success_when:
+    any:
+      - cookie: { name: SESSDATA, domain: .bilibili.com }
+  whoami: account.profile
+  allowed_domains: [bilibili.com, hdslb.com, bilivideo.com, biliapi.net]
+
+capabilities:
+  - id: account.profile
+    kind: query
+    effect: read
+    cache: { ttl: 3600 }
+    title: 个人资料
+    description: 获取当前登录账号的基本信息（昵称、UID、头像等）
+    request: { method: GET, path: /x/web-interface/nav }
+    output:
+      uid:
+        from: $.data.mid
+        unit: ''
+        scope: account
+        sensitivity: pii
+      nickname:
+        from: $.data.uname
+        unit: ''
+        scope: account
+        sensitivity: pii
+      face_url:
+        from: $.data.face
+        unit: ''
+        scope: account
+        sensitivity: content
+    data_time: { now: true }

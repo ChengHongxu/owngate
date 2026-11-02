@@ -21,7 +21,10 @@ export {
 } from './screencast.js'
 export {
   checkLoginOnce,
+  checkCookieConditions,
+  checkUrlConditions,
   waitForLogin,
+  type UrlSource,
   type LoginCheckConfig,
   type LoginCondition,
   type LoginResult,
@@ -31,3 +34,9 @@ export {
   type AuthFailure,
   type AuthFailureCode,
 } from './auth-detect.js'
+export {
+  CONNECTION_ID_RE,
+  InvalidConnectionIdError,
+  assertConnectionId,
+  isValidConnectionId,
+} from './connection-id.js'

@@ -346,3 +346,99 @@ button.link:hover {
     position: static;
   }
 }
+
+/* ── auth ── */
+
+.topbar-end {
+  margin-left: auto;
+}
+
+.auth-shell {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 12vh 16px 64px;
+}
+
+.brand-static {
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0 0 12px;
+}
+
+.form.tight {
+  margin-bottom: 0;
+}
+
+textarea {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  resize: vertical;
+}
+
+textarea:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.mono {
+  font-family: var(--mono);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.plain-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.secret {
+  display: block;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.status-ok-text {
+  color: var(--ok);
+}
+
+/* ── step-up dialog ── */
+
+.dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.dialog::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+
+.dialog-body {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+}
+
+.dialog-foot {
+  justify-content: flex-end;
+}

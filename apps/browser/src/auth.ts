@@ -3,6 +3,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import fp from 'fastify-plugin'
 import { verifyRequest } from '@webridge/browser-runtime'
+import { workerError } from './errors.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -10,12 +11,11 @@ declare module 'fastify' {
   }
 }
 
-const UNAUTH = {
-  code: 'UNAUTHORIZED',
-  what_happened: 'invalid signature or timestamp',
-  next_step: 'check BROWSER_RPC_SECRET and clock sync',
-  retryable: false,
-} as const
+const UNAUTH = workerError(
+  'UNAUTHENTICATED',
+  'invalid signature or timestamp',
+  'check BROWSER_RPC_SECRET and clock sync',
+)
 
 export function makeHmacPlugin(secret: string) {
   const plugin: FastifyPluginAsync = async (app) => {
@@ -29,7 +29,8 @@ export function makeHmacPlugin(secret: string) {
       try {
         parsed = JSON.parse(bodyStr)
       } catch {
-        done(new Error('Invalid JSON body'), undefined)
+        // statusCode 400: the app error handler turns it into INVALID_PARAMS.
+        done(Object.assign(new Error('request body is not valid JSON'), { statusCode: 400 }), undefined)
         return
       }
       done(null, parsed)

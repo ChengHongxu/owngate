@@ -1,7 +1,13 @@
-// Session guard shared by admin-facing route modules.
-// Not applied to existing routes yet — main.ts wiring decides which routes require it.
+// Session guard for the admin backend (design §8.4).
+//
+// createAdminGate() returns one onRequest hook that main.ts installs on the
+// root instance, so every /admin/* route (present and future, in any route
+// module) requires an admin session without per-handler code. Routes that hand
+// out accounts or data additionally need a step-up verification from the last
+// 15 minutes: they are listed in STEP_UP_ROUTES, or opt in with
+// `config: { stepUp: true }` on the route.
 
-import type { FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyReply, FastifyRequest, onRequestAsyncHookHandler } from 'fastify';
 import type { AuthService } from './service.js';
 
 export const SESSION_COOKIE = 'wr_session';
@@ -71,4 +77,75 @@ export async function requireStepUp(
     return null;
   }
   return session;
+}
+
+// ── Central admin gate ─────────────────────────────────────────────────────
+
+declare module 'fastify' {
+  interface FastifyContextConfig {
+    /** Route needs a recent step-up in addition to the admin session (§8.4). */
+    stepUp?: boolean;
+  }
+}
+
+/**
+ * Routes that require step-up, as `METHOD path` with path parameters written
+ * as `:param` (the parameter name does not matter for matching). §8.4 lists:
+ * open the remote screen, import cookies, issue a client token, change grants.
+ * The cookie-import route is listed ahead of its implementation so it is gated
+ * the moment it is registered.
+ */
+export const STEP_UP_ROUTES: readonly string[] = [
+  'POST /admin/clients',
+  'POST /admin/grants',
+  'POST /admin/screen/:connectionId/open',
+  'POST /admin/connections/:connectionId/cookies',
+];
+
+/** Replace every `:name` segment with `:`, so `:id` and `:connectionId` compare equal. */
+function normalizePattern(path: string): string {
+  return path.replace(/:[^/]+/g, ':');
+}
+
+const STEP_UP_KEYS = new Set(
+  STEP_UP_ROUTES.map((r) => {
+    const [method = '', path = ''] = r.split(' ');
+    return `${method.toUpperCase()} ${normalizePattern(path)}`;
+  }),
+);
+
+/** True when the route (by registered pattern) is in STEP_UP_ROUTES. */
+export function isStepUpRoute(method: string, routePattern: string): boolean {
+  return STEP_UP_KEYS.has(`${method.toUpperCase()} ${normalizePattern(routePattern)}`);
+}
+
+/** Paths covered by the gate: `/admin` and everything below it. */
+export function isAdminPath(path: string): boolean {
+  return path === '/admin' || path.startsWith('/admin/');
+}
+
+/**
+ * onRequest hook enforcing the admin session on every /admin/* request and
+ * step-up on the routes that need it. It runs before body parsing and schema
+ * validation, so an unauthenticated caller always gets 401, never a 400 that
+ * describes the route's body.
+ *
+ * Unmatched /admin/* URLs are gated too, so a caller without a session cannot
+ * tell which admin routes exist.
+ */
+export function createAdminGate(auth: AuthService): onRequestAsyncHookHandler {
+  return async function adminGate(request, reply) {
+    // routeOptions.url is the registered pattern; undefined when nothing matched.
+    const pattern = request.routeOptions.url;
+    const path = pattern ?? (request.raw.url ?? '').split('?')[0] ?? '';
+    if (!isAdminPath(path)) return;
+
+    const needsStepUp = pattern !== undefined &&
+      (request.routeOptions.config.stepUp === true || isStepUpRoute(request.method, pattern));
+
+    const session = needsStepUp
+      ? await requireStepUp(request, reply, auth)
+      : await requireAdminSession(request, reply, auth);
+    if (session === null) return reply;
+  };
 }

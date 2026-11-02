@@ -54,6 +54,7 @@ const GRANT: Grant = {
 
 function makeServices(overrides: Partial<InvokeServices> = {}): InvokeServices {
   const dispatchResult: ResultEnvelope = {
+    status: 'ok',
     outcome: 'success',
     data: { balance: 42 },
     error: null,
@@ -94,10 +95,11 @@ const REQ: InvokeRequest = {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 describe('invoke() auth', () => {
-  it('returns UNAUTHORIZED for unknown token', async () => {
+  it('returns UNAUTHENTICATED for unknown token', async () => {
     const env = await invoke({ ...REQ, token: 'bad-token' }, makeServices(), OPTS);
     expect(env.outcome).toBe('error');
-    expect(env.error?.code).toBe('UNAUTHORIZED');
+    expect(env.status).toBe('forbidden');
+    expect(env.error?.code).toBe('UNAUTHENTICATED');
   });
 
   it('returns CLIENT_REVOKED for revoked client', async () => {
@@ -121,13 +123,13 @@ describe('invoke() auth', () => {
     expect(env.error?.code).toBe('CAPABILITY_NOT_FOUND');
   });
 
-  it('returns FORBIDDEN when no grant for connection', async () => {
+  it('returns PERMISSION_DENIED when no grant for connection', async () => {
     const svc = makeServices({ auth: { getClient: () => CLIENT, getGrants: () => [] } });
     const env = await invoke(REQ, svc, OPTS);
-    expect(env.error?.code).toBe('FORBIDDEN');
+    expect(env.error?.code).toBe('PERMISSION_DENIED');
   });
 
-  it('returns FORBIDDEN when capability not in grant', async () => {
+  it('returns PERMISSION_DENIED when capability not in grant', async () => {
     const svc = makeServices({
       auth: {
         getClient: () => CLIENT,
@@ -135,7 +137,7 @@ describe('invoke() auth', () => {
       },
     });
     const env = await invoke(REQ, svc, OPTS);
-    expect(env.error?.code).toBe('FORBIDDEN');
+    expect(env.error?.code).toBe('PERMISSION_DENIED');
   });
 
   it('allows wildcard grant', async () => {
@@ -151,7 +153,7 @@ describe('invoke() auth', () => {
 });
 
 describe('invoke() support status', () => {
-  it('returns NEEDS_AUTH for needs_auth status', async () => {
+  it('returns AUTH_EXPIRED when the connection override says needs_auth', async () => {
     const svc = makeServices({
       connections: {
         get: () => ({
@@ -161,10 +163,36 @@ describe('invoke() support status', () => {
       },
     });
     const env = await invoke(REQ, svc, OPTS);
-    expect(env.error?.code).toBe('NEEDS_AUTH');
+    expect(env.error?.code).toBe('AUTH_EXPIRED');
+    expect(env.status).toBe('needs_reauth');
   });
 
-  it('returns ACTION_DISABLED for action capabilities', async () => {
+  it('returns AUTH_MISSING when needs_auth is the connector default', async () => {
+    const svc = makeServices({
+      capabilities: { get: () => ({ ...CAP, support: { status: 'needs_auth' } }) },
+      connections: { get: () => ({ ...CONN, capability_states: {} }) },
+    });
+    const env = await invoke(REQ, svc, OPTS);
+    expect(env.error?.code).toBe('AUTH_MISSING');
+    expect(env.status).toBe('needs_reauth');
+  });
+
+  it.each([
+    ['needs_plan', 'PLAN_INSUFFICIENT'],
+    ['unsupported', 'CAPABILITY_UNSUPPORTED'],
+    ['disabled', 'CAPABILITY_DISABLED'],
+  ] as const)('maps support status %s to %s', async (status, code) => {
+    const svc = makeServices({
+      connections: {
+        get: () => ({ ...CONN, capability_states: { 'account.balance': { status } } }),
+      },
+    });
+    const env = await invoke(REQ, svc, OPTS);
+    expect(env.error?.code).toBe(code);
+    expect(env.status).toBe('unsupported');
+  });
+
+  it('returns CAPABILITY_DISABLED for action capabilities', async () => {
     const actionCap: Capability = { ...CAP, id: 'post.create', kind: 'action', cache: null };
     const svc = makeServices({
       capabilities: { get: () => actionCap },
@@ -175,13 +203,14 @@ describe('invoke() support status', () => {
       },
     });
     const env = await invoke({ ...REQ, capability_id: 'post.create' }, svc, OPTS);
-    expect(env.error?.code).toBe('ACTION_DISABLED');
+    expect(env.error?.code).toBe('CAPABILITY_DISABLED');
   });
 });
 
 describe('invoke() cache', () => {
   it('returns cache hit with cache metadata', async () => {
     const cachedEnvelope: ResultEnvelope = {
+      status: 'ok',
       outcome: 'success',
       data: { balance: 99 },
       error: null,

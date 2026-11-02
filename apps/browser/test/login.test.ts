@@ -1,13 +1,17 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { BrowserContext, Page } from 'playwright'
-import { detectAuthFailure, signRequest, AsyncMutex } from '@webridge/browser-runtime'
-import type { BrowserEntry } from '@webridge/browser-runtime'
+import { detectAuthFailure, signRequest } from '@webridge/browser-runtime'
 import { validateImportedCookies, MAX_IMPORTED_COOKIES } from '../src/cookies.js'
-import { LoginStateTracker, parseLoginCondition } from '../src/login-state.js'
-import { SessionManager } from '../src/session.js'
+import {
+  LoginStateTracker,
+  MAX_LOGIN_CONDITIONS,
+  parseLoginCondition,
+  parseLoginConditions,
+} from '../src/login-state.js'
 import { execCapability } from '../src/exec.js'
 import { buildBrowserServer } from '../src/main.js'
+import { FakeSessionManager, post, until } from './helpers.js'
 
 // ── Fakes ─────────────────────────────────────────────────────────────────
 // Only the members detectAuthFailure / SessionManager touch are implemented.
@@ -53,27 +57,6 @@ function fakeContext(page: Page, cookies: FakeCookie[] = []): BrowserContext {
     },
   }
   return ctx as unknown as BrowserContext
-}
-
-class FakeSessionManager extends SessionManager {
-  constructor(private readonly fake: BrowserEntry) {
-    super('/tmp/unused')
-  }
-  override async entry(): Promise<BrowserEntry> {
-    return this.fake
-  }
-}
-
-function fakeEntry(context: BrowserContext): BrowserEntry {
-  return { context, display: ':99', connectionId: 'c1', lock: new AsyncMutex() }
-}
-
-async function until(cond: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!cond()) {
-    if (Date.now() > deadline) throw new Error('condition not met in time')
-    await new Promise((r) => setTimeout(r, 10))
-  }
 }
 
 // ── detectAuthFailure ─────────────────────────────────────────────────────
@@ -122,6 +105,21 @@ describe('detectAuthFailure', () => {
     expect(result.data).toBeUndefined()
     expect(result.error?.code).toBe('LOGIN_REQUIRED')
     expect(result.error?.retryable).toBe(false)
+  })
+
+  it('opens a page when the context has none instead of skipping the check', async () => {
+    const page = fakePage({ url: 'https://passport.bilibili.com/login' })
+    let opened = 0
+    const ctx = {
+      pages: () => [],
+      newPage: async () => {
+        opened++
+        return page
+      },
+    } as unknown as BrowserContext
+    const result = await execCapability(ctx, 'account.profile', {}, 30_000)
+    expect(opened).toBe(1)
+    expect(result.error?.code).toBe('LOGIN_REQUIRED')
   })
 })
 
@@ -172,6 +170,25 @@ describe('validateImportedCookies', () => {
     expect(r.ok).toBe(false)
     if (r.ok) return
     expect(r.error).not.toContain('s3cr3t')
+  })
+})
+
+describe('parseLoginConditions', () => {
+  it('accepts a non-empty array of conditions', () => {
+    const r = parseLoginConditions([
+      { type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' },
+      { type: 'url_not_contains', pattern: 'passport.' },
+    ])
+    expect(r.ok && r.conditions).toHaveLength(2)
+  })
+
+  it.each([
+    ['a single object', { type: 'cookie', name: 'a', domain: '.x.com' }],
+    ['an empty array', []],
+    ['a bad element', [{ type: 'cookie', name: 'a', domain: '.x.com' }, { type: 'whoami' }]],
+    ['too many', Array.from({ length: MAX_LOGIN_CONDITIONS + 1 }, () => ({ type: 'url_not_contains', pattern: 'x' }))],
+  ])('rejects %s', (_label, input) => {
+    expect(parseLoginConditions(input).ok).toBe(false)
   })
 })
 
@@ -258,69 +275,77 @@ describe('LoginStateTracker', () => {
 // ── SessionManager wiring ─────────────────────────────────────────────────
 
 describe('SessionManager login flow', () => {
-  const sessdata = { type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' } as const
+  const sessdata = [{ type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' }] as const
+  const loginUrl = 'https://passport.bilibili.com/login'
 
   it('detects login in the background after startLogin', async () => {
-    const page = fakePage()
-    const ctx = fakeContext(page, [{ name: 'SESSDATA', value: 'v', domain: '.bilibili.com' }])
-    const sm = new FakeSessionManager(fakeEntry(ctx))
-    const { stream_token } = await sm.startLogin('c1', 'https://passport.bilibili.com/login', {
-      successWhen: sessdata,
-      deadlineMs: 5_000,
-    })
+    const sm = new FakeSessionManager()
+    sm.world.cookiesFor('/profiles-default/c1').push({ name: 'SESSDATA', value: 'v', domain: '.bilibili.com' })
+    const { stream_token } = await sm.startLogin('c1', loginUrl, { successWhen: sessdata, deadlineMs: 5_000 })
     expect(stream_token).toMatch(/^[0-9a-f]{64}$/)
     await until(() => sm.getLoginState('c1').status === 'success')
+    await sm.closeAll()
+  })
+
+  it('succeeds when any one of several conditions holds', async () => {
+    const sm = new FakeSessionManager()
+    sm.world.redirects[loginUrl] = 'https://www.bilibili.com/'
+    await sm.startLogin('c1', loginUrl, {
+      successWhen: [...sessdata, { type: 'url_not_contains', pattern: 'passport.' }],
+      deadlineMs: 5_000,
+    })
+    await until(() => sm.getLoginState('c1').status === 'success')
+    expect(sm.getLoginState('c1').reason).toBe('url no longer contains passport.')
+    await sm.closeAll()
   })
 
   it('ends in timeout, not idle, when the condition never holds', async () => {
-    const ctx = fakeContext(fakePage())
-    const sm = new FakeSessionManager(fakeEntry(ctx))
-    await sm.startLogin('c1', 'https://passport.bilibili.com/login', {
-      successWhen: sessdata,
-      deadlineMs: 50,
-    })
+    const sm = new FakeSessionManager()
+    await sm.startLogin('c1', loginUrl, { successWhen: sessdata, deadlineMs: 50 })
     expect(sm.getLoginState('c1').status).toBe('pending')
     await until(() => sm.getLoginState('c1').status !== 'pending')
     expect(sm.getLoginState('c1')).toMatchObject({ status: 'timeout', reason: 'timeout' })
-  })
-
-  it('times out when no success_when was given', async () => {
-    const sm = new FakeSessionManager(fakeEntry(fakeContext(fakePage())))
-    await sm.startLogin('c1', 'https://passport.bilibili.com/login', { deadlineMs: 30 })
-    await until(() => sm.getLoginState('c1').status === 'timeout')
+    await sm.closeAll()
   })
 
   it('stopLogin aborts the wait and reports idle', async () => {
-    const sm = new FakeSessionManager(fakeEntry(fakeContext(fakePage())))
-    await sm.startLogin('c1', 'https://passport.bilibili.com/login', {
-      successWhen: sessdata,
-      deadlineMs: 60_000,
-    })
+    const sm = new FakeSessionManager()
+    await sm.startLogin('c1', loginUrl, { successWhen: sessdata, deadlineMs: 60_000 })
     await sm.stopLogin('c1')
     expect(sm.getLoginState('c1').status).toBe('idle')
+    await sm.closeAll()
   })
 
-  it('importCookies writes cookies and verifies against the condition', async () => {
-    const ctx = fakeContext(fakePage())
-    const sm = new FakeSessionManager(fakeEntry(ctx))
+  it('importCookies writes cookies and verifies against the conditions', async () => {
+    const sm = new FakeSessionManager()
     const r = await sm.importCookies(
       'c1',
       [{ name: 'SESSDATA', value: 'v', domain: '.bilibili.com', path: '/' }],
       sessdata,
     )
-    expect(r).toEqual({ imported: 1, verified: true })
+    expect(r).toEqual({ logged_in: true })
     expect(sm.getLoginState('c1').status).toBe('success')
+    await sm.closeAll()
   })
 
-  it('importCookies reports verified: false when the cookie is not the one needed', async () => {
-    const sm = new FakeSessionManager(fakeEntry(fakeContext(fakePage())))
+  it('importCookies reports logged_in: false when the cookie is not the one needed', async () => {
+    const sm = new FakeSessionManager()
     const r = await sm.importCookies(
       'c1',
       [{ name: 'other', value: 'v', domain: '.bilibili.com', path: '/' }],
       sessdata,
     )
-    expect(r).toEqual({ imported: 1, verified: false })
+    expect(r).toEqual({ logged_in: false })
     expect(sm.getLoginState('c1').status).toBe('idle')
+    await sm.closeAll()
+  })
+
+  it('importCookies falls back to the conditions of the last startLogin', async () => {
+    const sm = new FakeSessionManager()
+    await sm.startLogin('c1', loginUrl, { successWhen: sessdata, deadlineMs: 60_000 })
+    const r = await sm.importCookies('c1', [{ name: 'SESSDATA', value: 'v', domain: '.bilibili.com', path: '/' }])
+    expect(r).toEqual({ logged_in: true })
+    await sm.closeAll()
   })
 })
 
@@ -375,7 +400,29 @@ describe('login HTTP endpoints', () => {
       payload: body,
     })
     expect(resp.statusCode).toBe(400)
-    expect(JSON.parse(resp.body).code).toBe('INVALID_INPUT')
+    expect(JSON.parse(resp.body).code).toBe('INVALID_PARAMS')
     expect(resp.body).not.toContain('leak-me')
+  })
+
+  it('POST /v1/login/start requires success_when as a condition array', async () => {
+    const base = { connection_id: 'c1', url: 'https://passport.bilibili.com/login' }
+    for (const body of [
+      base,
+      { ...base, success_when: { type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' } },
+      { ...base, success_when: [] },
+    ]) {
+      const resp = await post(app, '/v1/login/start', body)
+      expect(resp.statusCode).toBe(400)
+      expect(JSON.parse(resp.body).code).toBe('INVALID_PARAMS')
+    }
+  })
+
+  it('POST /v1/login/start rejects a non-http url', async () => {
+    const resp = await post(app, '/v1/login/start', {
+      connection_id: 'c1',
+      url: 'file:///etc/passwd',
+      success_when: [{ type: 'url_not_contains', pattern: 'login' }],
+    })
+    expect(resp.statusCode).toBe(400)
   })
 })

@@ -12,6 +12,9 @@ type AdminUserRow = typeof schema.admin_users.$inferSelect;
 type WebauthnCredentialRow = typeof schema.webauthn_credentials.$inferSelect;
 type TotpSecretRow = typeof schema.totp_secrets.$inferSelect;
 type LoginSessionRow = typeof schema.login_sessions.$inferSelect;
+type ConnectionRow = typeof schema.connections.$inferSelect;
+type ClientRow = typeof schema.clients.$inferSelect;
+type GrantRow = typeof schema.grants.$inferSelect;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -94,7 +97,11 @@ export class DbClient {
     return this.call<unknown | undefined>('getConnection', { id });
   }
   listConnections() {
-    return this.call<unknown[]>('listConnections');
+    return this.call<ConnectionRow[]>('listConnections');
+  }
+  /** Deletes the connection; its grants and credentials cascade. */
+  deleteConnection(id: string) {
+    return this.call<ConnectionRow | undefined>('deleteConnection', { id });
   }
   updateConnectionStates(id: string, capability_states: unknown, updated_at: string) {
     return this.call('updateConnectionStates', { id, capability_states, updated_at });
@@ -107,6 +114,10 @@ export class DbClient {
   getClientByToken(token_hash: string) {
     return this.call<unknown | undefined>('getClientByToken', { token_hash });
   }
+  /** All clients, revoked ones included (callers need the flag). */
+  listClients() {
+    return this.call<ClientRow[]>('listClients');
+  }
   revokeClient(id: string) {
     return this.call('revokeClient', { id });
   }
@@ -117,6 +128,10 @@ export class DbClient {
   }
   getGrants(client_id: string) {
     return this.call<unknown[]>('getGrants', { client_id });
+  }
+  /** Every grant of every client. */
+  listGrants() {
+    return this.call<GrantRow[]>('listGrants');
   }
 
   // ── Tasks ──────────────────────────────────────────────────

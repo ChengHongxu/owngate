@@ -78,6 +78,15 @@ const handlers: Record<string, Handler> = {
     return orm.select().from(schema.connections).all();
   },
 
+  async deleteConnection(args) {
+    // grants and credentials cascade via their foreign keys.
+    const { id } = args as { id: string };
+    return orm.delete(schema.connections)
+      .where(eq(schema.connections.id, id))
+      .returning()
+      .get();
+  },
+
   async updateConnectionStates(args) {
     const { id, capability_states, updated_at } = args as {
       id: string; capability_states: unknown; updated_at: string;
@@ -100,6 +109,11 @@ const handlers: Record<string, Handler> = {
     return orm.query.clients.findFirst({
       where: (c, { eq, and }) => and(eq(c.token_hash, token_hash), eq(c.revoked, false)),
     });
+  },
+
+  async listClients() {
+    // Includes revoked clients: callers need the flag to answer CLIENT_REVOKED.
+    return orm.select().from(schema.clients).all();
   },
 
   async revokeClient(args) {
@@ -171,8 +185,17 @@ const handlers: Record<string, Handler> = {
 
   // Grants
   async upsertGrant(args) {
+    // (client_id, connection_id) is the primary key: a second grant for the
+    // same pair replaces the capability list instead of failing.
     const val = args as typeof schema.grants.$inferInsert;
-    return orm.insert(schema.grants).values(val).returning().get();
+    return orm.insert(schema.grants)
+      .values(val)
+      .onConflictDoUpdate({
+        target: [schema.grants.client_id, schema.grants.connection_id],
+        set: { capabilities: val.capabilities },
+      })
+      .returning()
+      .get();
   },
 
   async getGrants(args) {
@@ -180,6 +203,10 @@ const handlers: Record<string, Handler> = {
     return orm.query.grants.findMany({
       where: (g, { eq }) => eq(g.client_id, client_id),
     });
+  },
+
+  async listGrants() {
+    return orm.select().from(schema.grants).all();
   },
 
   // Admin users (auth)

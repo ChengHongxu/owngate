@@ -1,6 +1,6 @@
 // REST entry point — /api/invoke and /api/tasks
 import type { FastifyInstance } from 'fastify';
-import type { InvokeServices, InvokeOptions } from '@webridge/core';
+import type { ErrorCode, InvokeServices, InvokeOptions } from '@webridge/core';
 import { invoke } from '@webridge/core';
 import type { DbClient } from '@webridge/db';
 import type { Vault } from '@webridge/vault';
@@ -66,14 +66,14 @@ function extractToken(auth: string | undefined): string | null {
   return token;
 }
 
-function errorStatus(code: string | undefined): number {
+function errorStatus(code: ErrorCode | undefined): number {
   switch (code) {
-    case 'UNAUTHORIZED':
+    case 'UNAUTHENTICATED':
     case 'CLIENT_REVOKED': return 401;
-    case 'FORBIDDEN': return 403;
+    case 'PERMISSION_DENIED': return 403;
     case 'CONNECTION_NOT_FOUND':
     case 'CAPABILITY_NOT_FOUND': return 404;
-    case 'INVALID_INPUT': return 400;
+    case 'INVALID_PARAMS': return 400;
     default: return 500;
   }
 }

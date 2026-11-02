@@ -20,7 +20,7 @@ export const connections = sqliteTable('connections', {
   connector_id: text('connector_id').notNull().references(() => connectors.id),
   label: text('label').notNull(),
   config: text('config', { mode: 'json' }).notNull(),
-  capability_states: text('capability_states', { mode: 'json' }).notNull().default('{}'),
+  capability_states: text('capability_states', { mode: 'json' }).notNull().default({}),
   created_at: text('created_at').notNull().default(sql`(datetime('now'))`),
   updated_at: text('updated_at').notNull().default(sql`(datetime('now'))`),
 });
@@ -157,7 +157,7 @@ export const webauthn_credentials = sqliteTable('webauthn_credentials', {
   credential_id: text('credential_id').notNull().unique(), // base64url
   public_key: text('public_key').notNull(), // base64
   counter: integer('counter').notNull().default(0),
-  transports: text('transports', { mode: 'json' }).notNull().default('[]'),
+  transports: text('transports', { mode: 'json' }).notNull().default([]),
   created_at: text('created_at').notNull().default(sql`(datetime('now'))`),
 });
 

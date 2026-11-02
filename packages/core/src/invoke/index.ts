@@ -111,7 +111,7 @@ export async function invoke(
   const client = services.auth.getClient(tokenHash);
 
   if (!client) {
-    return envelopeError(err('UNAUTHORIZED', 'Invalid or expired token'), req);
+    return envelopeError(err('UNAUTHENTICATED', 'Invalid or expired token'), req);
   }
   if (client.revoked) {
     return envelopeError(err('CLIENT_REVOKED', 'This client has been revoked'), req);
@@ -133,26 +133,32 @@ export async function invoke(
   const grants = services.auth.getGrants(client.id);
   const grant = grants.find(g => g.connection_id === req.connection_id);
   if (!grant) {
-    return envelopeError(err('FORBIDDEN', `No grant for connection ${req.connection_id}`), req);
+    return envelopeError(err('PERMISSION_DENIED', `No grant for connection ${req.connection_id}`), req);
   }
   const allowedCaps = grant.capabilities;
   const hasWildcard = allowedCaps.includes('*');
   if (!hasWildcard && !allowedCaps.includes(req.capability_id)) {
-    return envelopeError(err('FORBIDDEN', `Not authorized to call ${req.capability_id}`), req);
+    return envelopeError(err('PERMISSION_DENIED', `Not authorized to call ${req.capability_id}`), req);
   }
 
   // ── 5. Support status check ───────────────────────────────────────────
-  const state = connection.capability_states[req.capability_id] ?? capability.support;
+  // A per-connection override was observed for this connection (the login
+  // probe writes needs_auth there), so needs_auth in it means the login this
+  // connection had is gone: AUTH_EXPIRED. needs_auth as the connector default
+  // means the capability needs a login before first use and nothing has been
+  // observed for this connection yet: AUTH_MISSING.
+  const override = connection.capability_states[req.capability_id];
+  const state = override ?? capability.support;
   const blockingStatuses: SupportStatus[] = ['needs_auth', 'needs_plan', 'unsupported', 'disabled'];
   if (blockingStatuses.includes(state.status)) {
-    const codeMap: Record<string, ErrorCode> = {
-      needs_auth: 'NEEDS_AUTH',
-      needs_plan: 'NEEDS_PLAN',
-      unsupported: 'NOT_SUPPORTED',
-      disabled: capability.kind === 'action' ? 'ACTION_DISABLED' : 'NOT_SUPPORTED',
+    const codeMap: Partial<Record<SupportStatus, ErrorCode>> = {
+      needs_auth: override === undefined ? 'AUTH_MISSING' : 'AUTH_EXPIRED',
+      needs_plan: 'PLAN_INSUFFICIENT',
+      unsupported: 'CAPABILITY_UNSUPPORTED',
+      disabled: 'CAPABILITY_DISABLED',
     };
     return envelopeError(
-      err(codeMap[state.status] ?? 'NOT_SUPPORTED', state.reason ?? `Capability status: ${state.status}`),
+      err(codeMap[state.status] ?? 'CAPABILITY_UNSUPPORTED', state.reason ?? `Capability status: ${state.status}`),
       req,
     );
   }
@@ -160,7 +166,7 @@ export async function invoke(
   // ── 6. Action safeguard (D9 — all actions disabled this release) ──────
   if (capability.kind === 'action') {
     return envelopeError(
-      err('ACTION_DISABLED', 'Write operations are not enabled in this release'),
+      err('CAPABILITY_DISABLED', 'Write operations are not enabled in this release'),
       req,
     );
   }

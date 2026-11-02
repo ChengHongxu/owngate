@@ -3,10 +3,10 @@
 import type { FastifyInstance } from 'fastify';
 import type { InvokeServices, InvokeOptions } from '@webridge/core';
 import { invoke } from '@webridge/core';
-import { createHash } from 'node:crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
+import { authenticateClient, listGrantedConnections } from './client-scope.js';
 
 interface McpDeps {
   services: InvokeServices;
@@ -57,19 +57,17 @@ export async function registerMcpRoutes(app: FastifyInstance, deps: McpDeps) {
     // ── list_connections tool ─────────────────────────────────────────────
     server.tool(
       'list_connections',
-      'List all available connections',
+      'List the connections this token is granted',
       {},
       async () => {
-        // Return connection IDs accessible to this client
-        const tokenHash = createHash('sha256').update(token).digest('hex');
-        const client = deps.services.auth.getClient(tokenHash);
-        if (!client) {
-          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'UNAUTHORIZED' }) }], isError: true };
+        // Same filter and shape as GET /api/connections (client-scope.ts).
+        const authn = authenticateClient(token, deps.services.auth, deps.invokeOpts.hashToken);
+        if (!authn.ok) {
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ error: authn.error }) }], isError: true };
         }
-        const grants = deps.services.auth.getGrants(client.id);
-        const connectionIds = grants.map(g => g.connection_id);
+        const connections = listGrantedConnections(authn.client.id, deps.services.auth, deps.services.connections);
         return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ connections: connectionIds }) }],
+          content: [{ type: 'text' as const, text: JSON.stringify({ connections }) }],
         };
       },
     );

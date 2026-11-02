@@ -40,7 +40,7 @@ describe('browser RPC HMAC auth', () => {
       payload: { connection_id: 'conn-1' },
     })
     expect(resp.statusCode).toBe(401)
-    expect(JSON.parse(resp.body).code).toBe('UNAUTHORIZED')
+    expect(JSON.parse(resp.body).code).toBe('UNAUTHENTICATED')
   })
 
   it('rejects a wrong signature', async () => {

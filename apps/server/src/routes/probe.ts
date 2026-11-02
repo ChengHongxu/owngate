@@ -10,25 +10,25 @@ import type { ProbeScheduler } from '../probe/scheduler.js';
 export interface ProbeRouteDeps {
   scheduler: Pick<ProbeScheduler, 'runOnce' | 'getStatus'>;
   /**
-   * Admin gate. When omitted every request is allowed: in M1 these routes sit
-   * next to the other /admin routes, which are not gated yet either.
-   * TODO(M1): main.ts must pass the real admin-session check here.
+   * Admin-session check (§8.4). Required: there is no default that lets a
+   * request through. In the full server the central gate (createAdminGate)
+   * has already answered 401 before this runs; this check keeps the module
+   * safe when it is mounted on its own.
    */
-  requireAdmin?: (request: FastifyRequest) => Promise<boolean>;
+  requireAdmin: (request: FastifyRequest) => Promise<boolean>;
 }
 
-const UNAUTHORIZED = { code: 'UNAUTHORIZED' };
+const NO_SESSION = { error: 'Not authenticated', code: 'NO_SESSION' };
 
 export async function registerProbeRoutes(app: FastifyInstance, deps: ProbeRouteDeps): Promise<void> {
   const { scheduler, requireAdmin } = deps;
 
-  const allowed = async (request: FastifyRequest): Promise<boolean> =>
-    requireAdmin === undefined ? true : requireAdmin(request);
+  const allowed = (request: FastifyRequest): Promise<boolean> => requireAdmin(request);
 
   app.post<{ Params: { connectionId: string } }>(
     '/admin/probe/:connectionId',
     async (request, reply) => {
-      if (!(await allowed(request))) return reply.status(401).send(UNAUTHORIZED);
+      if (!(await allowed(request))) return reply.status(401).send(NO_SESSION);
       const [result] = await scheduler.runOnce(request.params.connectionId);
       if (result === undefined || result.status === 'not_found') {
         return reply.status(404).send({ code: 'NOT_FOUND', what_happened: 'connection not found' });
@@ -38,12 +38,12 @@ export async function registerProbeRoutes(app: FastifyInstance, deps: ProbeRoute
   );
 
   app.post('/admin/probe', async (request, reply) => {
-    if (!(await allowed(request))) return reply.status(401).send(UNAUTHORIZED);
+    if (!(await allowed(request))) return reply.status(401).send(NO_SESSION);
     return scheduler.runOnce();
   });
 
   app.get('/admin/probe/status', async (request, reply) => {
-    if (!(await allowed(request))) return reply.status(401).send(UNAUTHORIZED);
+    if (!(await allowed(request))) return reply.status(401).send(NO_SESSION);
     return scheduler.getStatus();
   });
 }

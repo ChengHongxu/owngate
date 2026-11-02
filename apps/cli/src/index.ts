@@ -1,4 +1,4 @@
-import { Command } from 'commander'
+import { Command, CommanderError } from 'commander'
 import { loginCommand } from './commands/login.js'
 import { configCommand } from './commands/config.js'
 import { connCommand } from './commands/conn.js'
@@ -6,8 +6,15 @@ import { capCommand } from './commands/cap.js'
 import { queryCommand } from './commands/query.js'
 import { taskCommand } from './commands/task.js'
 
-export function createProgram(): Command {
+export function createProgram(forCatch = false): Command {
   const program = new Command()
+
+  if (forCatch) {
+    // exitOverride lets bin.ts map usage errors to exit code 2 (§6).
+    program.exitOverride((e) => {
+      throw e
+    })
+  }
 
   program
     .name('webridge')

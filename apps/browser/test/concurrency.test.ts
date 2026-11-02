@@ -1,92 +1,9 @@
-import { EventEmitter } from 'node:events'
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { BrowserContext } from 'playwright'
-import { BrowserPool, XvfbManager, signRequest } from '@webridge/browser-runtime'
-import type { BrowserPoolOptions } from '@webridge/browser-runtime'
-import { SessionManager } from '../src/session.js'
 import { buildBrowserServer } from '../src/main.js'
 import type { ExecResult } from '../src/exec.js'
-
-const SECRET = 'test-rpc-secret'
-
-// ── Fakes ─────────────────────────────────────────────────────────────────
-// A real BrowserPool and SessionManager; only the browser launch and Xvfb are fake.
-
-class FakeXvfb extends XvfbManager {
-  override async start() {
-    return { display: ':99', pid: 0 }
-  }
-  override async stop() {}
-}
-// One instance: every XvfbManager adds a process 'exit' listener.
-const fakeXvfb = new FakeXvfb()
-
-class FakePage {
-  gotoCalls: string[] = []
-  private current = 'about:blank'
-  url() {
-    return this.current
-  }
-  async goto(next: string) {
-    this.gotoCalls.push(next)
-    this.current = next
-    return null
-  }
-}
-
-/** Mirrors Playwright: close() emits 'close' before it resolves. */
-class FakeContext extends EventEmitter {
-  closed = false
-  readonly page = new FakePage()
-  pages() {
-    return this.closed ? [] : [this.page]
-  }
-  async newPage() {
-    return this.page
-  }
-  async cookies() {
-    return []
-  }
-  async close() {
-    if (this.closed) return
-    this.closed = true
-    this.emit('close', this)
-  }
-}
-
-class FakePool extends BrowserPool {
-  constructor(
-    xvfb: XvfbManager,
-    readonly profilesDirUsed: string,
-    options: BrowserPoolOptions,
-    private readonly launched: { dir: string; ctx: FakeContext }[],
-  ) {
-    super(xvfb, profilesDirUsed, options)
-  }
-  protected override async launchContext(): Promise<BrowserContext> {
-    await sleep(10)
-    const ctx = new FakeContext()
-    this.launched.push({ dir: this.profilesDirUsed, ctx })
-    return ctx as unknown as BrowserContext
-  }
-}
-
-class FakeBrowserSessionManager extends SessionManager {
-  readonly launched: { dir: string; ctx: FakeContext }[] = []
-  constructor(private readonly idleTimeoutMs?: number) {
-    super('/profiles-default')
-  }
-  protected override createPool(
-    _xvfb: XvfbManager,
-    profilesDir: string,
-    options: BrowserPoolOptions,
-  ): BrowserPool {
-    const opts =
-      this.idleTimeoutMs !== undefined ? { ...options, idleTimeoutMs: this.idleTimeoutMs } : options
-    return new FakePool(fakeXvfb, profilesDir, opts, this.launched)
-  }
-}
+import { FakeSessionManager, SECRET, checkBody, post, sleep } from './helpers.js'
 
 interface Span {
   connectionId: string
@@ -112,30 +29,6 @@ function overlaps(a: Span, b: Span): boolean {
   return a.enter < b.exit && b.enter < a.exit
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-let execSeq = 0
-function checkBody(connectionId: string) {
-  return {
-    connection_id: connectionId,
-    exec_id: `exec-${++execSeq}`,
-    capability: 'account.profile',
-    params: { conn: connectionId },
-    deadline_ms: 30_000,
-  }
-}
-
-function post(app: FastifyInstance, url: string, body: Record<string, unknown>) {
-  return app.inject({
-    method: 'POST',
-    url,
-    headers: { 'content-type': 'application/json', ...signRequest(JSON.stringify(body), SECRET) },
-    payload: body,
-  })
-}
-
 beforeAll(() => {
   process.env['BROWSER_RPC_SECRET'] = SECRET
 })
@@ -144,11 +37,11 @@ beforeAll(() => {
 
 describe('/v1/check concurrency', () => {
   let app: FastifyInstance
-  let sm: FakeBrowserSessionManager
+  let sm: FakeSessionManager
   const spans: Span[] = []
 
   beforeAll(async () => {
-    sm = new FakeBrowserSessionManager()
+    sm = new FakeSessionManager()
     app = (await buildBrowserServer({ exec: recordingExec(spans, 40), sessionManager: sm })).app
   })
 
@@ -170,7 +63,7 @@ describe('/v1/check concurrency', () => {
     expect(r2.statusCode).toBe(200)
     expect(spans).toHaveLength(2)
     expect(overlaps(spans[0]!, spans[1]!)).toBe(false)
-    expect(sm.launched).toHaveLength(1)
+    expect(sm.world.launched).toHaveLength(1)
   })
 
   it('runs checks on different connections in parallel (the test can see overlap)', async () => {
@@ -187,23 +80,23 @@ describe('/v1/check concurrency', () => {
 
 describe('SessionManager after the pool closes a browser', () => {
   it('drops the entry on the context close event and relaunches on the next use', async () => {
-    const sm = new FakeBrowserSessionManager(20)
+    const sm = new FakeSessionManager({ idleTimeoutMs: 20 })
     const first = await sm.entry('c1')
     expect(sm.getEntry('c1')).toBe(first)
 
     await sleep(60) // idle reclaim
-    expect(sm.launched[0]?.ctx.closed).toBe(true)
+    expect(sm.world.launched[0]?.ctx.closed).toBe(true)
     expect(sm.getEntry('c1')).toBeUndefined()
 
     const second = await sm.entry('c1')
     expect(second).not.toBe(first)
     expect(second.context.pages()).toHaveLength(1)
-    expect(sm.launched).toHaveLength(2)
+    expect(sm.world.launched).toHaveLength(2)
     await sm.closeAll()
   })
 
-  it('/v1/check after idle reclaim runs on a live browser, /v1/probe reports needs_auth until then', async () => {
-    const sm = new FakeBrowserSessionManager(20)
+  it('/v1/check after idle reclaim runs on a live browser', async () => {
+    const sm = new FakeSessionManager({ idleTimeoutMs: 20 })
     let seenPages = -1
     const exec = async (ctx: BrowserContext): Promise<ExecResult> => {
       seenPages = ctx.pages().length
@@ -213,34 +106,32 @@ describe('SessionManager after the pool closes a browser', () => {
     try {
       await post(app, '/v1/check', checkBody('c1'))
       await sleep(60)
-      const probe = await post(app, '/v1/probe', { connection_id: 'c1', capability: 'x' })
-      expect(JSON.parse(probe.body)).toEqual({ support: 'needs_auth' })
-
+      expect(sm.getEntry('c1')).toBeUndefined()
       const resp = await post(app, '/v1/check', checkBody('c1'))
       expect(resp.statusCode).toBe(200)
       expect(seenPages).toBe(1)
-      expect(sm.launched).toHaveLength(2)
+      expect(sm.world.launched).toHaveLength(2)
     } finally {
       await sm.closeAll()
       await app.close()
     }
   })
 
-  it('relaunches with the profile dir given to openSession', async () => {
-    const sm = new FakeBrowserSessionManager(20)
-    await sm.openSession('c1', '/profiles-custom')
+  it('profiles live at <worker profiles root>/<connection_id>, also after a relaunch', async () => {
+    const sm = new FakeSessionManager({ idleTimeoutMs: 20, profilesDir: '/profiles-root' })
+    await sm.openSession('c1')
     await sleep(60)
     await sm.entry('c1')
-    expect(sm.launched.map((l) => l.dir)).toEqual(['/profiles-custom', '/profiles-custom'])
+    expect(sm.world.launched.map((l) => l.dir)).toEqual(['/profiles-root/c1', '/profiles-root/c1'])
     await sm.closeAll()
   })
 
   it('closeSession drops the entry', async () => {
-    const sm = new FakeBrowserSessionManager()
+    const sm = new FakeSessionManager()
     await sm.entry('c1')
     await sm.closeSession('c1')
     expect(sm.getEntry('c1')).toBeUndefined()
-    expect(sm.launched[0]?.ctx.closed).toBe(true)
+    expect(sm.world.launched[0]?.ctx.closed).toBe(true)
   })
 })
 
@@ -248,13 +139,13 @@ describe('SessionManager after the pool closes a browser', () => {
 
 describe('SessionManager.startLogin locking', () => {
   it('waits for the connection lock before navigating and releases it after', async () => {
-    const sm = new FakeBrowserSessionManager()
+    const sm = new FakeSessionManager()
     const entry = await sm.entry('c1')
-    const page = sm.launched[0]!.ctx.page
+    const page = sm.world.launched[0]!.ctx.page
 
     const release = await entry.lock.acquire()
     const starting = sm.startLogin('c1', 'https://passport.bilibili.com/login', {
-      successWhen: { type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' },
+      successWhen: [{ type: 'cookie', name: 'SESSDATA', domain: '.bilibili.com' }],
       deadlineMs: 60_000,
     })
     await sleep(20)

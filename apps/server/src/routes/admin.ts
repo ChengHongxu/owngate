@@ -1,12 +1,16 @@
-// Admin backend routes — connection/client/grant management
-// M0: in-memory maps, no authentication yet (added in M1)
+// Admin backend routes — connection/client/grant management.
+// Authentication is not done here: main.ts installs createAdminGate()
+// (auth/guard.ts) on the root instance, which requires an admin session for
+// every /admin/* route and step-up for the ones in STEP_UP_ROUTES (§8.4).
+// The in-memory maps are the read path for invoke(); the DB is written first
+// and main.ts reloads the maps from it at startup.
 import type { FastifyInstance } from 'fastify';
 import type { DbClient } from '@webridge/db';
 import type { Vault } from '@webridge/vault';
 import type { Capability, Connection, Client, Grant } from '@webridge/core';
 import { randomBytes, createHash } from 'node:crypto';
 import type { ConnectorRegistry } from '../registry.js';
-import { openBrowserSession, closeBrowserSession, startLogin, stopLogin } from '../dispatchers/browser.js';
+import type { BrowserClient, CookieItem } from '../browser-client.js';
 
 interface AdminDeps {
   db: DbClient;
@@ -15,6 +19,8 @@ interface AdminDeps {
   clientMap: Map<string, Client>;
   grantMap: Map<string, Grant[]>;
   connectorRegistry: ConnectorRegistry;
+  browserClient: BrowserClient;
+  audit: (entry: { action: string; target?: string; detail?: unknown; client_id?: string }) => void;
 }
 
 export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps) {
@@ -62,14 +68,22 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
       created_at: now,
       updated_at: now,
     };
-    connectionMap.set(id, conn);
     await deps.db.createConnection({ id, connector_id: conn.connector_id, label: conn.label, config: conn.config });
+    connectionMap.set(id, conn);
     return reply.status(201).send(conn);
   });
 
   app.delete<{ Params: { id: string } }>('/admin/connections/:id', async (request, reply) => {
-    if (!connectionMap.has(request.params.id)) return reply.status(404).send({ error: 'Not found' });
-    connectionMap.delete(request.params.id);
+    const { id } = request.params;
+    if (!connectionMap.has(id)) return reply.status(404).send({ error: 'Not found' });
+    // Grants and credentials cascade in the DB; mirror that in memory so the
+    // connection does not come back at the next restart.
+    await deps.db.deleteConnection(id);
+    connectionMap.delete(id);
+    for (const [clientId, grants] of grantMap) {
+      const kept = grants.filter((g) => g.connection_id !== id);
+      if (kept.length !== grants.length) grantMap.set(clientId, kept);
+    }
     return reply.send({ ok: true });
   });
 
@@ -101,16 +115,16 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
       revoked: false,
       created_at: now,
     };
-    clientMap.set(id, client);
     await deps.db.createClient({ id, label: client.label, kind: client.kind, token_hash });
+    clientMap.set(id, client);
     return reply.status(201).send({ ...client, token }); // token shown once
   });
 
   app.post<{ Params: { id: string } }>('/admin/clients/:id/revoke', async (request, reply) => {
     const client = clientMap.get(request.params.id);
     if (!client) return reply.status(404).send({ error: 'Not found' });
-    (client as Client & { revoked: boolean }).revoked = true;
     await deps.db.revokeClient(request.params.id);
+    client.revoked = true;
     return reply.send({ ok: true });
   });
 
@@ -132,12 +146,14 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
     },
   }, async (request, reply) => {
     const { client_id, connection_id, capabilities } = request.body;
+    if (!clientMap.has(client_id)) return reply.status(404).send({ error: 'Client not found' });
+    if (!connectionMap.has(connection_id)) return reply.status(404).send({ error: 'Connection not found' });
     const grant: Grant = { client_id, connection_id, capabilities };
+    await deps.db.upsertGrant({ client_id, connection_id, capabilities });
     const existing = grantMap.get(client_id) ?? [];
     const idx = existing.findIndex(g => g.connection_id === connection_id);
     if (idx >= 0) existing[idx] = grant; else existing.push(grant);
     grantMap.set(client_id, existing);
-    await deps.db.upsertGrant({ client_id, connection_id, capabilities });
     return reply.status(201).send(grant);
   });
 
@@ -148,17 +164,20 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
     Body: { connector_id: string; capability: Capability };
   }>('/admin/capabilities', async (request, reply) => {
     const { connector_id, capability } = request.body
-    // Register as a single-capability connector (or merge into existing)
-    const existing = connectorRegistry.getManifest(connector_id)
-    const caps = existing?.compiled.capabilities ?? {}
-    caps[capability.id] = capability
-    connectorRegistry.register(connector_id, {
-      id: connector_id,
-      version: existing?.compiled.version ?? '0.0.0',
-      title: existing?.compiled.title ?? connector_id,
-      transport: existing?.compiled.transport ?? capability.transport,
-      capabilities: caps,
-    })
+    // Merge into the existing connector, keeping every compiled field (login
+    // in particular); only the capabilities map changes. A new connector id
+    // becomes a single-capability connector.
+    const existing = connectorRegistry.getManifest(connector_id)?.compiled
+    const capabilities = { ...(existing?.capabilities ?? {}), [capability.id]: capability }
+    connectorRegistry.register(connector_id, existing !== undefined
+      ? { ...existing, capabilities }
+      : {
+          id: connector_id,
+          version: '0.0.0',
+          title: connector_id,
+          transport: capability.transport,
+          capabilities,
+        })
     return reply.status(201).send({ ok: true, key: `${connector_id}:${capability.id}` })
   })
 
@@ -173,73 +192,80 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
 
   // ── Browser sessions & login (M1) ────────────────────────────────────
 
+  // The worker allocates the profile, display and proxy credentials from the
+  // connection id (§13.1); the server never names a profile path.
   app.post<{
-    Body: { connection_id: string; profile_path?: string };
+    Body: { connection_id: string };
   }>('/admin/browser/open', {
     schema: {
       body: {
         type: 'object',
         required: ['connection_id'],
+        additionalProperties: false,
         properties: {
           connection_id: { type: 'string' },
-          profile_path: { type: 'string' },
         },
       },
     },
   }, async (request, reply) => {
-    const conn = connectionMap.get(request.body.connection_id)
-    if (!conn) return reply.status(404).send({ error: 'Connection not found' })
-    const profilePath = request.body.profile_path ?? `/profiles/${conn.id}`
+    const conn = connectionMap.get(request.body.connection_id);
+    if (!conn) return reply.status(404).send({ error: 'Connection not found' });
     try {
-      const result = await openBrowserSession(conn.id, profilePath)
-      return reply.status(201).send(result)
+      const result = await deps.browserClient.openSession(conn.id);
+      return reply.status(201).send(result);
     } catch (e) {
-      return reply.status(502).send({ error: (e as Error).message })
+      return reply.status(502).send({ error: (e as Error).message });
     }
-  })
+  });
 
   app.post<{ Params: { id: string } }>('/admin/browser/:id/close', async (request, reply) => {
     try {
-      await closeBrowserSession(request.params.id)
-      return reply.send({ ok: true })
+      await deps.browserClient.closeSession(request.params.id);
+      return reply.send({ ok: true });
     } catch (e) {
-      return reply.status(502).send({ error: (e as Error).message })
+      return reply.status(502).send({ error: (e as Error).message });
     }
-  })
+  });
+
+  // ── POST /admin/connections/:connectionId/cookies (二次验证) ───────────
 
   app.post<{
-    Body: { connection_id: string; url: string; qr_selector?: string };
-  }>('/admin/login/start', {
+    Params: { connectionId: string };
+    Body: { cookies: CookieItem[] };
+  }>('/admin/connections/:connectionId/cookies', {
     schema: {
       body: {
         type: 'object',
-        required: ['connection_id', 'url'],
+        required: ['cookies'],
         properties: {
-          connection_id: { type: 'string' },
-          url: { type: 'string' },
-          qr_selector: { type: 'string' },
+          cookies: { type: 'array', items: { type: 'object' } },
         },
       },
     },
   }, async (request, reply) => {
-    try {
-      const result = await startLogin(
-        request.body.connection_id,
-        request.body.url,
-        request.body.qr_selector,
-      )
-      return reply.status(201).send(result)
-    } catch (e) {
-      return reply.status(502).send({ error: (e as Error).message })
-    }
-  })
+    const { connectionId } = request.params;
+    const conn = connectionMap.get(connectionId);
+    if (!conn) return reply.status(404).send({ error: 'CONNECTION_NOT_FOUND', what_happened: '连接不存在' });
 
-  app.post<{ Params: { id: string } }>('/admin/login/:id/stop', async (request, reply) => {
-    try {
-      await stopLogin(request.params.id)
-      return reply.send({ ok: true })
-    } catch (e) {
-      return reply.status(502).send({ error: (e as Error).message })
+    const login = deps.connectorRegistry.getLogin(conn.connector_id);
+    if (!login) {
+      return reply.status(400).send({
+        error: 'CAPABILITY_UNSUPPORTED',
+        what_happened: '该连接没有 login 段，不支持 cookie 导入',
+      });
     }
-  })
+
+    try {
+      const result = await deps.browserClient.importCookies(connectionId, request.body.cookies, login.successWhen);
+      // Audit: record only name/domain, NEVER the value (design §8.4).
+      deps.audit({
+        action: 'cookies.import',
+        target: connectionId,
+        detail: { cookies: result.cookies, logged_in: result.logged_in },
+      });
+      return result;
+    } catch (e) {
+      return reply.status(502).send({ error: (e as Error).message });
+    }
+  });
 }
