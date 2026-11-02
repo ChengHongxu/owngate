@@ -32,6 +32,20 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
     return { connections: Array.from(connectionMap.values()) };
   });
 
+  // ── List connectors ────────────────────────────────────────────────────
+  app.get('/admin/connectors', async () => {
+    const connectors: Array<{ id: string; title: string; transport: string; has_auth: boolean }> = [];
+    for (const [id, entry] of (connectorRegistry as any).manifests.entries()) {
+      connectors.push({
+        id,
+        title: entry.compiled.title,
+        transport: entry.compiled.transport,
+        has_auth: entry.compiled.auth !== undefined,
+      });
+    }
+    return { connectors };
+  });
+
   app.post<{
     Body: { connector_id: string; label: string; config: Record<string, unknown> };
   }>('/admin/connections', {
@@ -50,21 +64,35 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
     const id = randomBytes(8).toString('hex');
     const now = new Date().toISOString();
 
+    // Check if connector exists and requires auth
+    const manifest = connectorRegistry.getManifest(request.body.connector_id);
+    if (!manifest) {
+      return reply.status(400).send({ error: 'Unknown connector', code: 'UNKNOWN_CONNECTOR' });
+    }
+
     // Ensure connector row exists (foreign key requires it)
     await deps.db.upsertConnector({
       id: request.body.connector_id,
-      version: '0.0.0',
-      title: request.body.connector_id,
-      transport: 'http',
+      version: manifest.compiled.version,
+      title: manifest.compiled.title,
+      transport: manifest.compiled.transport,
       manifest: {},
     });
+
+    // If connector requires auth, set all capabilities to needs_auth
+    const capability_states: Record<string, { status: 'needs_auth'; reason?: string }> = {};
+    if (manifest.compiled.auth) {
+      for (const capId of Object.keys(manifest.compiled.capabilities)) {
+        capability_states[capId] = { status: 'needs_auth', reason: '未设置凭据' };
+      }
+    }
 
     const conn: Connection = {
       id,
       connector_id: request.body.connector_id,
       label: request.body.label,
       config: request.body.config,
-      capability_states: {},
+      capability_states,
       created_at: now,
       updated_at: now,
     };
@@ -84,6 +112,65 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
       const kept = grants.filter((g) => g.connection_id !== id);
       if (kept.length !== grants.length) grantMap.set(clientId, kept);
     }
+    return reply.send({ ok: true });
+  });
+
+  // ── Connection credentials ─────────────────────────────────────────────
+  app.get<{ Params: { id: string } }>('/admin/connections/:id/credentials', async (request, reply) => {
+    const { id } = request.params;
+    const conn = connectionMap.get(id);
+    if (!conn) return reply.status(404).send({ error: 'Connection not found' });
+
+    const rows = await deps.db.listCredentials(id);
+    const fields = rows.map((r) => ({ key: r.key, updated_at: r.updated_at }));
+    return { fields };
+  });
+
+  app.put<{
+    Params: { id: string };
+    Body: { credentials: Record<string, string> };
+  }>('/admin/connections/:id/credentials', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['credentials'],
+        properties: {
+          credentials: { type: 'object' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { id } = request.params;
+    const conn = connectionMap.get(id);
+    if (!conn) return reply.status(404).send({ error: 'Connection not found' });
+
+    const manifest = connectorRegistry.getManifest(conn.connector_id);
+    if (!manifest?.compiled.auth) {
+      return reply.status(400).send({ error: 'Connector does not require credentials' });
+    }
+
+    // Encrypt and store each credential
+    for (const [key, value] of Object.entries(request.body.credentials)) {
+      if (typeof value !== 'string') {
+        return reply.status(400).send({ error: `Credential "${key}" must be a string` });
+      }
+      const encrypted = deps.vault.encrypt(value);
+      await deps.db.upsertCredential({
+        connection_id: id,
+        key,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        auth_tag: encrypted.auth_tag,
+      });
+    }
+
+    // Load into registry
+    const existing = connectorRegistry.getCredentials(id) ?? {};
+    for (const [key, value] of Object.entries(request.body.credentials)) {
+      existing[key] = value;
+    }
+    connectorRegistry.setCredentials(id, existing);
+
     return reply.send({ ok: true });
   });
 
@@ -189,6 +276,59 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminDeps)
     }
     return { capabilities: [] }
   })
+
+  // ── Admin invoke (bypasses client token auth) ──────────────────────────
+  app.post<{
+    Body: { connection_id: string; capability_id: string; input?: unknown };
+  }>('/admin/invoke', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['connection_id', 'capability_id'],
+        properties: {
+          connection_id: { type: 'string' },
+          capability_id: { type: 'string' },
+          input: {},
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const conn = connectionMap.get(request.body.connection_id);
+    if (!conn) {
+      return reply.status(404).send({ error: 'Connection not found', code: 'CONNECTION_NOT_FOUND' });
+    }
+
+    const cap = connectorRegistry.getCapability(conn.connector_id, request.body.capability_id);
+    if (!cap) {
+      return reply.status(404).send({ error: 'Capability not found', code: 'CAPABILITY_NOT_FOUND' });
+    }
+
+    const creds = connectorRegistry.getCredentials(conn.id) ?? {};
+    const manifest = connectorRegistry.getManifest(conn.connector_id);
+
+    if (cap.transport === 'http') {
+      const { dispatchHttp } = await import('../dispatchers/http.js');
+      const capDef = manifest?.capabilityDefs[cap.id];
+      const envelope = await dispatchHttp(
+        conn,
+        cap,
+        request.body.input ?? {},
+        creds,
+        manifest?.http,
+        capDef?.output,
+        capDef?.success_when,
+        capDef?.auth_failed_when,
+        capDef?.request as { method: string; path: string } | undefined,
+      );
+      return reply.send(envelope);
+    } else if (cap.transport === 'browser') {
+      const { dispatchBrowser } = await import('../dispatchers/browser.js');
+      const envelope = await dispatchBrowser(deps.browserClient!, conn, cap, request.body.input ?? {});
+      return reply.send(envelope);
+    }
+
+    return reply.status(500).send({ error: 'Unknown transport', code: 'INTERNAL_ERROR' });
+  });
 
   // ── Browser sessions & login (M1) ────────────────────────────────────
 

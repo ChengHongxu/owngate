@@ -96,7 +96,7 @@ export function createStepUpGate(): {
 }
 
 export interface CallOptions {
-  method?: 'GET' | 'POST' | 'DELETE'
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   /** 会被 JSON.stringify；省略则不发 body，也不带 content-type */
   body?: unknown
   /** 默认 true。二次验证接口自身必须关掉，避免循环 */

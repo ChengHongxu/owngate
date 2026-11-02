@@ -105,6 +105,8 @@ function AddConnectionForm({ onDone }: { onDone: () => void }) {
   const [label, setLabel] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
 
+  const connectors = useQuery({ queryKey: ['connectors'], queryFn: api.listConnectors })
+
   const create = useMutation({
     mutationFn: () =>
       api.createConnection({
@@ -125,7 +127,17 @@ function AddConnectionForm({ onDone }: { onDone: () => void }) {
     >
       <label>
         站点类型
-        <input value={connectorId} onChange={(e) => setConnectorId(e.target.value)} />
+        {connectors.data ? (
+          <select value={connectorId} onChange={(e) => setConnectorId(e.target.value)}>
+            {connectors.data.connectors.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.title} ({c.id})
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input value={connectorId} disabled placeholder="加载中..." />
+        )}
       </label>
       <label>
         名称

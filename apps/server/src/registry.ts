@@ -18,6 +18,7 @@ export interface ManifestEntry {
     timeout_ms?: number
   }
   capabilityDefs: Record<string, {
+    request?: { method: string; path: string }
     output?: Record<string, { from: string; transform?: string; unit?: string; scope?: string; sensitivity?: string }>
     success_when?: string
     auth_failed_when?: string

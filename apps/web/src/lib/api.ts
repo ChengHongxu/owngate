@@ -116,13 +116,30 @@ export const api = {
   deleteConnection: (id: string) =>
     call<{ ok: boolean }>(`/admin/connections/${enc(id)}`, { method: 'DELETE' }),
 
+  // ── connectors ──
+  listConnectors: () =>
+    call<{ connectors: Array<{ id: string; title: string; transport: string; has_auth: boolean }> }>(
+      '/admin/connectors',
+    ),
+
+  // ── credentials ──
+  getCredentials: (connectionId: string) =>
+    call<{ fields: Array<{ key: string; updated_at: string }> }>(
+      `/admin/connections/${enc(connectionId)}/credentials`,
+    ),
+  setCredentials: (connectionId: string, credentials: Record<string, string>) =>
+    call<{ ok: boolean }>(`/admin/connections/${enc(connectionId)}/credentials`, {
+      method: 'PUT',
+      body: { credentials },
+    }),
+
   // ── capabilities ──
   listCapabilities: (connectorId: string) =>
     call<{ capabilities: Capability[] }>(`/admin/capabilities?connector_id=${enc(connectorId)}`),
 
   // ── invoke ──
   invoke: (input: { connection_id: string; capability_id: string; input?: unknown; no_cache?: boolean }) =>
-    call<Envelope>('/api/invoke', { method: 'POST', body: input }),
+    call<Envelope>('/admin/invoke', { method: 'POST', body: input }),
 
   // ── browser remote screen（登录页地址由 server 从清单 login.url 取）──
   openScreen: (connectionId: string) =>

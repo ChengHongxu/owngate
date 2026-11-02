@@ -66,6 +66,8 @@ export function ConnectionDetailPage({
 
       {isBrowser && <LoginStateSection id={id} />}
 
+      <CredentialsSection connectionId={id} connectorId={conn.connector_id} />
+
       <h2>能力</h2>
       {capabilities.isPending && <p className="muted">正在读取能力…</p>}
       {capabilities.isError && (
@@ -108,6 +110,13 @@ export function ConnectionDetailPage({
           )
         })}
       </ul>
+
+      {run.isError && (
+        <div className="card error-card">
+          <p className="card-title">调用失败</p>
+          <p className="error-text">{describeAuthError(run.error)}</p>
+        </div>
+      )}
 
       {last && (
         <div className="card">
@@ -229,6 +238,93 @@ function LoginStateSection({ id }: { id: string }) {
         <div className="card-actions">
           <button className="primary" type="submit" disabled={importCookies.isPending}>
             {importCookies.isPending ? '导入中…' : '导入'}
+          </button>
+        </div>
+      </form>
+    </>
+  )
+}
+
+function CredentialsSection({ connectionId, connectorId }: { connectionId: string; connectorId: string }) {
+  const qc = useQueryClient()
+  const [accessToken, setAccessToken] = useState('')
+  const [userId, setUserId] = useState('')
+
+  const connectors = useQuery({ queryKey: ['connectors'], queryFn: api.listConnectors })
+  const connector = connectors.data?.connectors.find((c) => c.id === connectorId)
+
+  const credentials = useQuery({
+    queryKey: ['credentials', connectionId],
+    queryFn: () => api.getCredentials(connectionId),
+  })
+
+  const saveCreds = useMutation({
+    mutationFn: () => {
+      const creds: Record<string, string> = {}
+      if (accessToken.trim()) creds['access_token'] = accessToken.trim()
+      if (userId.trim()) creds['user_id'] = userId.trim()
+      return api.setCredentials(connectionId, creds)
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['credentials', connectionId] })
+      void qc.invalidateQueries({ queryKey: ['connections'] })
+      setAccessToken('')
+      setUserId('')
+    },
+  })
+
+  if (!connector?.has_auth) return null
+
+  return (
+    <>
+      <h2>凭据</h2>
+      {credentials.isPending && <p className="muted">加载中…</p>}
+      {credentials.data && credentials.data.fields.length > 0 && (
+        <div className="card">
+          <p className="card-title">已设置的凭据</p>
+          <ul className="plain-list small">
+            {credentials.data.fields.map((f) => (
+              <li key={f.key}>
+                <code>{f.key}</code> <span className="muted">· 更新于 {new Date(f.updated_at).toLocaleString()}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <form
+        className="card form"
+        onSubmit={(e) => {
+          e.preventDefault()
+          saveCreds.mutate()
+        }}
+      >
+        <p className="card-title">设置凭据</p>
+        <label>
+          访问令牌 (access_token)
+          <input
+            type="password"
+            value={accessToken}
+            onChange={(e) => setAccessToken(e.target.value)}
+            placeholder="在站点个人设置中生成"
+          />
+        </label>
+        {connectorId === 'newapi' && (
+          <label>
+            用户 ID (user_id)
+            <input
+              value={userId}
+              onChange={(e) => setUserId(e.target.value)}
+              placeholder="在站点个人设置中查看"
+            />
+          </label>
+        )}
+        {saveCreds.isError && (
+          <p className="error-text">保存失败：{describeAuthError(saveCreds.error)}</p>
+        )}
+        {saveCreds.isSuccess && <p className="card-title status-ok-text">✓ 已保存</p>}
+        <div className="card-actions">
+          <button className="primary" type="submit" disabled={saveCreds.isPending}>
+            {saveCreds.isPending ? '保存中…' : '保存'}
           </button>
         </div>
       </form>
