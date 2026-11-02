@@ -151,7 +151,7 @@ export async function buildServer() {
   };
 
   // ── Fastify server ─────────────────────────────────────────────────────────
-  const app = Fastify({ logger: { level: LOG_LEVEL } });
+  const app = Fastify({ logger: { level: process.env['VITEST'] ? 'error' : LOG_LEVEL } });
 
   // Health check
   app.get('/health', async () => ({ ok: true, time: new Date().toISOString() }));
