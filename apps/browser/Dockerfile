@@ -12,25 +12,35 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# 先复制依赖描述，利用层缓存
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
-COPY apps/browser/package.json apps/browser/tsconfig.json ./apps/browser/
-COPY packages/core/package.json packages/core/tsconfig.json ./packages/core/
-COPY packages/browser-runtime/package.json packages/browser-runtime/tsconfig.json ./packages/browser-runtime/
-
-# 启用 pnpm
+# Playwright 镜像的 Node 没有 corepack，直接 npm 全局安装 pnpm
 ENV PNPM_HOME=/usr/local/share/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-RUN corepack enable && corepack prepare pnpm@11.15.1 --activate \
- && pnpm install --frozen-lockfile
 
-# 复制源码并构建
+# 整个工作区一起复制：pnpm 的 workspace 结构必须与 pnpm-workspace.yaml 一致，
+# 只复制部分包会让 --frozen-lockfile 与后续 build 的依赖状态检查失败。
 COPY . .
-RUN pnpm --filter @webridge/browser build
+RUN npm install -g pnpm@11.15.1 \
+ && pnpm install --frozen-lockfile --filter @webridge/browser... \
+ && pnpm --filter @webridge/core --filter @webridge/browser-runtime build \
+ && pnpm --filter @webridge/browser build
 
 ENV NODE_ENV=production
 EXPOSE 4000
 
-# 手动启动 Xvfb，再运行 worker。
-# $DISPLAY 默认 :99；Xvfb 监听同套接字，等待就绪后启动 node。
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x720x24 -nolisten tcp & DISPLAY=:99 xdpyinfo -display :99 >/dev/null 2>&1 && exec node apps/browser/dist/main.js"]
+# 手动启动 Xvfb 并轮询就绪（xvfb-run 在 Docker/WSL2 下会死锁，见 deploy/browser-entrypoint.sh）
+COPY deploy/browser-entrypoint.sh /usr/local/bin/browser-entrypoint.sh
+RUN chmod +x /usr/local/bin/browser-entrypoint.sh
+
+# ── Chromium 沙箱（设计 §4.4.1 / §12.2：禁止 --no-sandbox）───────────────
+# Playwright 的 Chromium 以 root 运行时会自动加 --no-sandbox。
+# 因此必须是非 root 用户：setuid sandbox helper 需要 setuid root 位，
+# 浏览器进程本身以 pwuser(1000) 运行。宿主机不支持 user namespace 时，
+# 这条 + compose 的 cap_add: SYS_ADMIN 是官方推荐组合。
+RUN set -eu; \
+    chown root:root /ms-playwright/chromium-*/chrome-linux*/chrome_sandbox; \
+    chmod 4755 /ms-playwright/chromium-*/chrome-linux*/chrome_sandbox; \
+    mkdir -p /profiles && chown -R 1000:1000 /profiles
+
+USER 1000:1000
+
+CMD ["/usr/local/bin/browser-entrypoint.sh"]

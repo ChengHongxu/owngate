@@ -64,11 +64,20 @@ export class BrowserPool {
 
     const context = await chromium.launchPersistentContext(profilePath, {
       headless: false,
+      // Playwright defaults this to false, which injects --no-sandbox.
+      // Design doc §4.4.1/§12.2 forbids running without the Chromium sandbox.
+      chromiumSandbox: true,
       args: [
         '--disable-blink-features=AutomationControlled',
         '--disable-gpu',
         '--disable-dev-shm-usage',
         `--display=${display}`,
+        // Use the user-namespace sandbox, not the setuid helper: the bundled
+        // chrome_sandbox binary expects API version 0 while Playwright's
+        // Chromium ships version 1 ("you need 0"), so the setuid path aborts.
+        // SYS_ADMIN (compose) makes unshare -U available; --no-sandbox stays out.
+        '--disable-setuid-sandbox',
+        '--namespace-sandbox',
       ],
       ignoreDefaultArgs: ['--enable-automation'],
       locale: 'zh-CN',

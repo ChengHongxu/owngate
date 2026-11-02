@@ -48,7 +48,8 @@ services:
     cap_drop:
       - ALL
     cap_add:
-      - SYS_ADMIN                        # Chromium 沙箱所需，见设计 §12.2
+      - SYS_ADMIN                        # user/mount namespace（Chromium 沙箱）
+      - SYS_CHROOT                       # 默认 seccomp 的 chroot 规则要求（实测）
     mem_limit: 8g
     restart: unless-stopped
 

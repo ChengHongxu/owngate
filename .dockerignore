@@ -1,0 +1,16 @@
+# Docker 构建上下文排除项（见 deploy/docker-compose.yml 的 context: ..）
+node_modules
+**/node_modules
+dist
+**/dist
+dist-test
+**/dist-test
+.git
+.env
+*.db
+*.db-wal
+*.db-shm
+deploy/secrets
+scripts/sandbox-test/out
+coverage
+.turbo
