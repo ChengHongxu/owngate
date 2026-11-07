@@ -175,6 +175,11 @@ const serverSource = `
 `;
 
 try {
+  // GitHub runners use a different host uid than the containers. Set ownership
+  // on disposable fixtures without weakening the control secret's 0400 mode.
+  docker(['run', '--rm', '--network', 'none', '--user', '0:0',
+    '--mount', `type=bind,source=${fixtures},target=/fixtures`, '--entrypoint', 'chown', runtimeImage,
+    '1000:1000', '/fixtures/http_runtime_secret', '/fixtures/upstream_credential']);
   docker(['network', 'create', '--internal', internal]); networks.push(internal);
   docker(['network', 'create', external]); networks.push(external);
   docker(['run', '--detach', '--name', upstream, '--network', external, '--network-alias', 'upstream', '--read-only', '--user', '1000:1000',

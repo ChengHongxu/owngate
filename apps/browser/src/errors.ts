@@ -1,47 +1,7 @@
-// Worker error bodies (design §13.1): always {code, what_happened, next_step,
-// retryable}, with `code` from the §6.1 table only.
-//
-// The table is copied here rather than imported from @owngate/core: core's
-// ErrorCode union still carries pre-§6.1 codes (INVALID_INPUT, UNAUTHORIZED,
-// TIMEOUT …) and lacks UNAUTHENTICATED, so typing against it would let those
-// slip back in. test/errors.test.ts parses §6.1 out of 设计方案.md and checks
-// this table against it, so a drift fails the build.
+// Worker errors share the canonical client error codes and retry policy.
+import { CODE_CLASSIFICATION, type ErrorCode } from '@owngate/core'
 
-/** §6.1 error codes with their 可重试 column. UPSTREAM_ERROR is "视情况"; unjudged means yes. */
-export const ERROR_RETRYABLE = {
-  UNAUTHENTICATED: false,
-  CLIENT_REVOKED: false,
-  CONNECTION_NOT_FOUND: false,
-  CAPABILITY_NOT_FOUND: false,
-  AUTH_EXPIRED: false,
-  AUTH_MISSING: false,
-  AUTH_REJECTED: false,
-  PERMISSION_DENIED: false,
-  GRANT_REVOKED: false,
-  CAPABILITY_UNSUPPORTED: false,
-  CAPABILITY_DISABLED: false,
-  PLAN_INSUFFICIENT: false,
-  INVALID_PARAMS: false,
-  RATE_LIMITED: true,
-  UPSTREAM_TIMEOUT: true,
-  UPSTREAM_UNAVAILABLE: true,
-  UPSTREAM_ERROR: true,
-  PARSE_FAILED: false,
-  ITEM_PARSE_FAILED: false,
-  RISK_CONTROL_DETECTED: false,
-  LOGIN_REQUIRED: false,
-  CAPTCHA_PRESENT: false,
-  BROWSER_UNAVAILABLE: true,
-  CONNECTOR_CRASHED: true,
-  APPROVAL_REQUIRED: false,
-  APPROVAL_EXPIRED: false,
-  APPROVAL_CONTENT_CHANGED: false,
-  OUTCOME_UNKNOWN: false,
-  CIRCUIT_OPEN: true,
-  INTERNAL_ERROR: true,
-} as const satisfies Record<string, boolean>
-
-export type WorkerErrorCode = keyof typeof ERROR_RETRYABLE
+export type WorkerErrorCode = ErrorCode
 
 export interface WorkerError {
   code: WorkerErrorCode
@@ -55,7 +15,7 @@ export function workerError(
   whatHappened: string,
   nextStep: string,
 ): WorkerError {
-  return { code, what_happened: whatHappened, next_step: nextStep, retryable: ERROR_RETRYABLE[code] }
+  return { code, what_happened: whatHappened, next_step: nextStep, retryable: CODE_CLASSIFICATION[code].retryable }
 }
 
 /** HTTP status for a worker-level error body. */

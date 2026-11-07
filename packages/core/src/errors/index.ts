@@ -1,8 +1,4 @@
-// Canonical error codes — single source of truth for all three entry points.
-// Design doc §6.1: the ErrorCode set, CODE_CLASSIFICATION and ERROR_TEXT must
-// be exactly the codes in the 错误码全表 (test/errors.test.ts checks all three
-// against the doc in both directions).
-// Design doc §9.1: same error means the same thing across CLI/MCP/backend.
+// Canonical error codes and client behavior shared by CLI, MCP, HTTP and browser.
 
 export type ErrorCode =
   // ── 客户端与请求 ────────────────────────────────
@@ -47,7 +43,7 @@ export type ErrorCode =
   // ── 内部 ────────────────────────────────────────
   | 'INTERNAL_ERROR';          // 未归类异常
 
-/** 信封状态（设计文档 §6）。与 ErrorCode 是一对多关系。 */
+/** 信封状态。与 ErrorCode 是一对多关系。 */
 export type EnvelopeStatus =
   | 'ok'
   | 'error'
@@ -65,8 +61,8 @@ export interface CodeClassification {
 }
 
 /**
- * 每个错误码的归类状态与可重试性，严格按 §6.1「归类状态」「可重试」两列。
- * `UPSTREAM_ERROR` 在表中为「视情况」：站点 5xx 可重试、4xx 不可重试，
+ * 每个错误码的信封状态与默认可重试性。
+ * `UPSTREAM_ERROR` 视情况判定：站点 5xx 可重试、4xx 不可重试，
  * 由执行器通过 err() 的 retryable 覆盖判定；未判定时按可重试处理。
  */
 export const CODE_CLASSIFICATION: Readonly<Record<ErrorCode, Readonly<CodeClassification>>> = Object.freeze({
@@ -110,7 +106,7 @@ export interface ErrorText {
 }
 
 /**
- * 每个错误码的中文默认文案，CLI、MCP、后台共用（§6.1）。
+ * 每个错误码的中文默认文案，CLI、MCP、后台共用。
  * 调用方有更具体的信息（连接名、站点原因）时用自己的 message，
  * 缺少 next_step 时从这里补齐。
  */

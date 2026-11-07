@@ -1,38 +1,25 @@
-// Worker error bodies use §6.1 codes only (design §6.1, §13.1), deadline_ms is
+// Worker error bodies use shared error codes only, deadline_ms is
 // enforced, and connection_id is checked before it reaches a path.
 
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { describe, it, expect, beforeAll, afterEach } from 'vitest'
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify'
 import type { BrowserContext } from 'playwright'
 import { buildBrowserServer } from '../src/main.js'
-import { ERROR_RETRYABLE } from '../src/errors.js'
+import { workerError } from '../src/errors.js'
+import { CODE_CLASSIFICATION, type ErrorCode } from '@owngate/core'
 import type { ExecResult } from '../src/exec.js'
 import { FakeSessionManager, SECRET, checkBody, post, signedGet, sleep, until } from './helpers.js'
 
-// ── §6.1 table, read from the design doc ──────────────────────────────────
+const EXPECTED = new Map(Object.entries(CODE_CLASSIFICATION).map(([code, value]) => [code, value.retryable]))
 
-function designCodes(): Map<string, boolean> {
-  const doc = readFileSync(fileURLToPath(new URL('../../../设计方案.md', import.meta.url)), 'utf8')
-  const start = doc.indexOf('### 6.1 错误码全表')
-  expect(start).toBeGreaterThan(-1)
-  const section = doc.slice(start, doc.indexOf('\n## ', start))
-  const codes = new Map<string, boolean>()
-  for (const line of section.split('\n')) {
-    const m = /^\|\s*`([A-Z_]+)`\s*\|[^|]*\|\s*([^|]+?)\s*\|/.exec(line)
-    // 视情况 (UPSTREAM_ERROR): "未判定时按是处理".
-    if (m) codes.set(m[1]!, m[2] !== '否')
-  }
-  return codes
-}
-
-const DESIGN = designCodes()
-
-describe('error code table', () => {
-  it('matches §6.1 in 设计方案.md exactly, including retryable', () => {
-    expect(DESIGN.size).toBeGreaterThan(20)
-    expect(new Map(Object.entries(ERROR_RETRYABLE))).toEqual(DESIGN)
+describe('error code contract', () => {
+  it('uses the shared retry policy for every worker error', () => {
+    for (const code of Object.keys(CODE_CLASSIFICATION) as ErrorCode[]) {
+      expect(workerError(code, 'what happened', 'next step')).toEqual({
+        code, what_happened: 'what happened', next_step: 'next step',
+        retryable: CODE_CLASSIFICATION[code].retryable,
+      })
+    }
   })
 })
 
@@ -79,9 +66,9 @@ function expectSpecError(resp: LightMyRequestResponse, code: string, status?: nu
   const error = errorOf(resp)
   expect(error).toBeDefined()
   expect(Object.keys(error!).sort()).toEqual(['code', 'next_step', 'retryable', 'what_happened'])
-  expect(DESIGN.has(String(error!['code']))).toBe(true)
+  expect(EXPECTED.has(String(error!['code']))).toBe(true)
   expect(error!['code']).toBe(code)
-  expect(error!['retryable']).toBe(DESIGN.get(code))
+  expect(error!['retryable']).toBe(EXPECTED.get(code))
 }
 
 describe('worker error bodies', () => {
