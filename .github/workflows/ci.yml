@@ -30,6 +30,11 @@ jobs:
       - run: pnpm test
       - name: Verify release deployment packaging
         run: node --test scripts/release-bundle.test.mjs
+      - name: Allow Chromium sandbox user namespaces on the disposable runner
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Install Chromium for local response interception tests
         run: pnpm --filter @owngate/browser exec playwright install --with-deps chromium
       - name: Verify real Chromium interception and authenticated egress fixtures

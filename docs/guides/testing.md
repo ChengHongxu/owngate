@@ -28,6 +28,8 @@ pnpm --filter @owngate/web exec vitest run test/query-result.test.ts
 pnpm --filter @owngate/browser exec playwright install --with-deps chromium
 ```
 
+GitHub 托管的临时 runner 会先允许 AppArmor 下的非特权用户命名空间，以启用 Chromium 沙箱。这项设置只作用于该次 CI 虚拟机；浏览器测试不会通过关闭 Chromium 沙箱来规避限制。
+
 Linux 默认浏览器缓存通常在 `~/.cache/ms-playwright`；设置 `PLAYWRIGHT_BROWSERS_PATH` 时使用指定目录。生产镜像的安装位置以 [browser Dockerfile](../../apps/browser/Dockerfile) 为准，不依赖宿主浏览器。OwnGate 的受管登录通过 CDP screencast 传送画面，自动化 smoke 则直接使用 Playwright 的 `chromium.launch`、页面 API、响应夹具和截图能力。
 
 运行需要显式启用的真实 Chromium 回归：
