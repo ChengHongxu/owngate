@@ -149,5 +149,5 @@ jobs:
           flags=()
           if [ "$RELEASE_PRERELEASE" = true ]; then flags+=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" \
-            "out/release/owngate-deploy-${VERSION}.tar.gz" out/release/SHA256SUMS \
+            "out/release/owngate-deploy-${VERSION}.tar.gz" out/release/SHA256SUMS out/release/install.sh \
             --verify-tag --title "OwnGate ${VERSION}" --generate-notes "${flags[@]}"

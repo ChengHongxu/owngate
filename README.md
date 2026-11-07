@@ -16,11 +16,19 @@ OwnGate 是自托管的个人网络资产网关。你在自己的服务中管理
 
 ## 开始使用
 
-需要 Docker Engine 24+、Docker Compose v2，以及正式使用时提供 HTTPS 的反向代理。
+需要 Linux amd64、Docker Engine 24+、Docker Compose 2.24+，以及正式使用时提供 HTTPS 的反向代理。
 
-1. 使用 GitHub Release 中的版本部署包，按[发布包部署说明](deploy/release-README.md)配置并启动；需要自行构建时使用[源码部署指南](deploy/README.md)。
+1. 按[交互式安装指南](deploy/release-README.md#交互式安装推荐)选择目录、地址和端口，自动下载版本部署包、生成密钥，并选择是否启动；也可按同页步骤手动部署；需要自行构建时使用[源码部署指南](deploy/README.md)。
 2. 按[首次使用](docs/guides/first-query.md)创建管理员、添加连接并完成一次只读查询。
 3. 创建限定权限的客户端，按[客户端接入](docs/guides/connect-clients.md)连接 MCP、CLI 或 HTTP API。
+
+交互式安装：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ChengHongxu/owngate/main/deploy/install.sh | bash
+```
+
+脚本默认仅监听本机，首次安装会生成独立密钥，并询问是否启动。已有实例请按[升级步骤](deploy/release-README.md#数据与升级)保留配置与数据。
 
 正式发行提供 Linux amd64 的四个服务镜像和版本部署包，不要求安装全局 CLI。开发者也可以从源码构建；CLI 构建后可用 `node apps/cli/dist/bin.js` 调用。
 

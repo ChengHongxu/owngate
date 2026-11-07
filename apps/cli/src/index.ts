@@ -17,7 +17,7 @@ export function createProgram(forCatch = false): Command {
   program
     .name('owngate')
     .description('通过连接名称查询网站能力')
-    .version('0.1.0')
+    .version('0.1.4')
     .allowExcessArguments(true)
     .action(() => {
       if (program.args.length) program.error(`error: unknown command ${JSON.stringify(program.args[0])}`, { code: 'commander.unknownCommand' })

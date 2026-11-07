@@ -38,10 +38,13 @@ git push origin v0.1.0
 ```text
 owngate-deploy-0.1.0.tar.gz
 SHA256SUMS
+install.sh
 ```
 
-部署包只包含 `compose.yaml`、`.env.example`、`nginx.example.conf` 和 `README.md`。Compose 引用固定版本的四个镜像，没有源码构建步骤，也不包含数据库、密钥或客户端令牌。校验文件用于检查部署压缩包是否完整，不代替对发布来源的确认。
+部署包只包含 `compose.yaml`、`.env.example`、`nginx.example.conf`、`README.md` 和 `install.sh`。Release 另附同一份 `install.sh`；`SHA256SUMS` 同时校验压缩包和脚本。Compose 引用固定版本的四个镜像，没有源码构建步骤，也不包含数据库、密钥或客户端令牌。校验文件用于检查部署压缩包是否完整，不代替对发布来源的确认。
 
-下载部署包，在全新目录按随包 README 验证拉取与首次启动。确认匿名用户能读取四个镜像，并检查 Release 中生成的更新说明，补充实际的升级步骤与已知限制。发布中断可能留下部分已上传的镜像；以成功完成的 Release 为对外交付依据，排查失败后重跑原提交的工作流。
+CI 会验证安装脚本的首次安装、私有下载、错误校验和、已有实例保护与启动失败保留配置等场景。下载部署包，在全新目录按随包 README 验证拉取与首次启动。
+
+公开仓库后，README 中的 raw GitHub 安装入口才能匿名访问。先发布包含新脚本的版本，再向用户推荐安装入口；默认安装最新正式 Release，预发布版需要显式传入 `--version`。脚本通过 Release 解析版本并使用该版本部署包，不从 main 分支生成 Compose。私有仓库使用安装指南中的 gh 下载流程，不将 GitHub Token 写入脚本、URL 或部署文件。确认匿名用户能读取四个镜像，并检查 Release 中生成的更新说明，补充实际的升级步骤与已知限制。发布中断可能留下部分已上传的镜像；以成功完成的 Release 为对外交付依据，排查失败后重跑原提交的工作流。
 
 用户升级必须保留 `.env`、密钥与持久数据。数据库可能发生升级，回退前需要匹配版本的备份，不能仅更换镜像标签。完整维护要求见[离线维护](maintenance.md)。返回[文档导航](../README.md)。

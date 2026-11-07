@@ -20,7 +20,7 @@ test('archive includes only deployment files and pins all four images without so
     const { archive, checksums } = await createReleaseBundle({ version: '0.2.0-rc.1', owner: 'OwnGate-Team', out });
     const prefix = 'owngate-deploy-0.2.0-rc.1';
     const files = execFileSync('tar', ['-tzf', archive], { encoding: 'utf8' }).trim().split('\n').filter(path => !path.endsWith('/')).sort();
-    assert.deepEqual(files, ['.env.example', 'README.md', 'compose.yaml', 'nginx.example.conf'].map(name => `${prefix}/${name}`).sort());
+    assert.deepEqual(files, ['.env.example', 'README.md', 'compose.yaml', 'nginx.example.conf', 'install.sh'].map(name => `${prefix}/${name}`).sort());
     const compose = JSON.parse(execFileSync('tar', ['-xOzf', archive, `${prefix}/compose.yaml`], { encoding: 'utf8' }));
     assert.deepEqual(Object.keys(compose.services).sort(), ['browser', 'egress', 'http-runtime', 'server']);
     for (const [name, service] of Object.entries(compose.services)) {
@@ -34,7 +34,8 @@ test('archive includes only deployment files and pins all four images without so
     assert.equal(compose.secrets.master_key.file, './secrets/master_key');
     assert.ok(compose.volumes['server-data']);
     const digest = createHash('sha256').update(await readFile(archive)).digest('hex');
-    assert.equal(await readFile(checksums, 'utf8'), `${digest}  ${basename(archive)}\n`);
+    const installerDigest = createHash('sha256').update(await readFile(join(out, 'install.sh'))).digest('hex');
+    assert.equal(await readFile(checksums, 'utf8'), `${digest}  ${basename(archive)}\n${installerDigest}  install.sh\n`);
   } finally {
     await rm(out, { recursive: true, force: true });
   }

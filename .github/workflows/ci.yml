@@ -29,7 +29,9 @@ jobs:
       - run: pnpm typecheck:tests
       - run: pnpm test
       - name: Verify release deployment packaging
-        run: node --test scripts/release-bundle.test.mjs
+        run: |
+          bash -n deploy/install.sh
+          node --test scripts/release-bundle.test.mjs scripts/install.test.mjs
       - name: Allow Chromium sandbox user namespaces on the disposable runner
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then

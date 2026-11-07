@@ -2,9 +2,56 @@
 
 本部署包使用已经构建的版本镜像，无需克隆源码、安装 Node.js 或在本机编译。支持 Linux amd64。需要 Docker Engine 24+、Docker Compose 2.24+、OpenSSL，以及正式使用时提供 HTTPS 的宿主机 nginx。
 
-OwnGate 当前面向单人自用或可信局域网。下载版本对应的部署压缩包与 `SHA256SUMS`，在同一目录运行 `sha256sum -c SHA256SUMS`，确认成功后解压。以下命令在解压后包含 `compose.yaml` 的目录执行。
+OwnGate 当前面向单人自用或可信局域网。你可以使用交互式脚本完成首次安装，也可以手动配置。
 
-## 首次启动
+## 交互式安装（推荐）
+
+在 Linux amd64 主机上执行。需要 Bash、Docker Engine 24+、Docker Compose 2.24+、curl、tar、sha256sum 和 OpenSSL；脚本检查依赖，不会代装 Docker 或修改防火墙。
+
+直接运行以下入口；脚本通过终端读取交互输入，支持 `curl | bash`：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ChengHongxu/owngate/main/deploy/install.sh | bash
+```
+
+按提示选择安装目录、端口和访问地址，确认后可立即拉取镜像并启动。默认下载最新正式 Release，监听 `127.0.0.1:3000`，访问地址为 `http://localhost:3000`。远程服务器上的 localhost 指服务器本身；可用 SSH 端口转发试用，正式使用配置 HTTPS 反向代理。
+
+如需先检查脚本，或固定版本，先从目标 Release 下载 `install.sh`，再运行：
+
+```sh
+bash install.sh --help
+# VERSION 替换为该 Release 的版本号，不含 v
+bash install.sh --version VERSION
+```
+
+自动化部署可以显式传参：
+
+```sh
+bash install.sh --yes --dir ./owngate --port 3000 \
+  --origin https://owngate.example.com --start
+```
+
+`--yes` 使用参数和默认值；不带 `--start` 只生成配置。脚本校验部署包 SHA256，使用发布包中的 Compose 配置，自动生成四个独立密钥，并设置为容器 UID 1000 可读的 `0600` 权限。当前用户不是 root 或 UID 1000 时，只为密钥属主设置调用 sudo。检查通过后才写入安装目录；目录非空或存在 OwnGate 数据卷时会拒绝首次安装，不会替换旧密钥。升级请使用下面的升级步骤。
+
+### 私有仓库安装
+
+部署私有 fork 时，匿名 curl 无法下载。先通过 `gh auth login` 登录有仓库读取权限的身份，再获取脚本并执行：
+
+```sh
+gh api repos/ChengHongxu/owngate/contents/deploy/install.sh \
+  --jq .content | base64 --decode > install.sh
+bash install.sh --private
+```
+
+私有发布包通过 `gh` 下载，镜像仍由 Docker 拉取。启动前需要另行执行 `docker login ghcr.io`，使用具有镜像读取权限的身份；`gh auth login` 不会自动登录 Docker。也可先完成配置，登录后再手动启动。
+
+脚本不安装 nginx 或证书。使用 HTTPS 地址时，按生成目录中的 `nginx.example.conf` 配好反向代理。镜像拉取或启动失败时，配置与密钥会保留；进入安装目录执行 `docker compose pull`、`docker compose up -d` 重试，使用 `docker compose logs` 查看错误。不要为重试删除密钥或数据卷。
+
+## 手动安装
+
+下载版本对应的部署压缩包与 `SHA256SUMS`，在同一目录运行 `sha256sum --ignore-missing -c SHA256SUMS`，确认部署包显示 `OK` 后解压。以下命令在解压后包含 `compose.yaml` 的目录执行。
+
+### 配置与首次启动
 
 ```sh
 cp .env.example .env

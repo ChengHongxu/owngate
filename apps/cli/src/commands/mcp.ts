@@ -22,7 +22,7 @@ export async function runMcpStdio(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void>
     throw new Error('The MCP server must be an HTTP(S) URL without embedded credentials.')
   }
   const shutdown = new AbortController()
-  const remote = new Client({ name: 'owngate-stdio-bridge', version: '0.1.0' })
+  const remote = new Client({ name: 'owngate-stdio-bridge', version: '0.1.4' })
   const transport = new StreamableHTTPClientTransport(endpoint, {
     requestInit: { headers: { authorization: `Bearer ${config.token}` } },
     reconnectionOptions: { maxRetries: 0, initialReconnectionDelay: 100, maxReconnectionDelay: 100, reconnectionDelayGrowFactor: 1 },
@@ -67,7 +67,7 @@ export async function runMcpStdio(timeoutMs = DEFAULT_TIMEOUT_MS): Promise<void>
     if (closeStarted) return
     const capabilities = remote.getServerCapabilities()
     const instructions = remote.getInstructions()
-    local = new Server({ name: 'owngate', version: '0.1.0' }, { capabilities: {
+    local = new Server({ name: 'owngate', version: '0.1.4' }, { capabilities: {
       ...(capabilities?.tools ? { tools: { listChanged: Boolean(capabilities.tools.listChanged) } } : {}),
       ...(capabilities?.resources ? { resources: { listChanged: Boolean(capabilities.resources.listChanged) } } : {}),
     }, ...(instructions ? { instructions } : {}) })

@@ -52,7 +52,7 @@ export async function createReleaseBundle({ version, owner, out }) {
     // JSON is valid YAML. Keeping the source Compose as the only deployment model
     // preserves network, volume, secret and sandbox settings without text rewrites.
     await writeFile(join(bundle, 'compose.yaml'), JSON.stringify(compose, null, 2) + '\n');
-    for (const [source, target] of [['.env.example', '.env.example'], ['nginx.example.conf', 'nginx.example.conf'], ['release-README.md', 'README.md']]) {
+    for (const [source, target] of [['.env.example', '.env.example'], ['nginx.example.conf', 'nginx.example.conf'], ['release-README.md', 'README.md'], ['install.sh', 'install.sh']]) {
       await copyFile(join(root, 'deploy', source), join(bundle, target));
     }
     await mkdir(output, { recursive: true });
@@ -60,7 +60,9 @@ export async function createReleaseBundle({ version, owner, out }) {
     const archivePath = join(output, archiveName);
     execFileSync('tar', ['-czf', archivePath, '-C', temporary, stem], { stdio: 'pipe' });
     const hash = createHash('sha256').update(await readFile(archivePath)).digest('hex');
-    await writeFile(join(output, 'SHA256SUMS'), `${hash}  ${archiveName}\n`);
+    await copyFile(join(root, 'deploy/install.sh'), join(output, 'install.sh'));
+    const installerHash = createHash('sha256').update(await readFile(join(output, 'install.sh'))).digest('hex');
+    await writeFile(join(output, 'SHA256SUMS'), `${hash}  ${archiveName}\n${installerHash}  install.sh\n`);
     return { archive: archivePath, checksums: join(output, 'SHA256SUMS') };
   } finally {
     await rm(temporary, { recursive: true, force: true });
