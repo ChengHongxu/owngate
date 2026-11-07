@@ -1,6 +1,8 @@
-# 部署 OwnGate
+# 从源码部署 OwnGate
 
 本指南用于单人自用或可信局域网部署。需要 Docker Engine 24+、Docker Compose v2，以及提供 HTTPS 的宿主机 nginx。下方密钥生成示例还需要 Node.js 24+。配置参考 [docker-compose.yml](docker-compose.yml)、[.env.example](.env.example) 和 [nginx.example.conf](nginx.example.conf)。所有命令在仓库根目录执行。
+
+已有版本时可直接使用 GitHub Release 部署包，按[发布包部署说明](release-README.md)拉取镜像；以下步骤用于在本机从源码构建。版本发布流程见[发布指南](../docs/guides/releases.md)。
 
 ## 首次部署
 

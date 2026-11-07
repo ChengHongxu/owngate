@@ -2,8 +2,10 @@ name: CI
 
 on:
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -26,6 +28,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm typecheck:tests
       - run: pnpm test
+      - name: Verify release deployment packaging
+        run: node --test scripts/release-bundle.test.mjs
       - name: Install Chromium for local response interception tests
         run: pnpm --filter @owngate/browser exec playwright install --with-deps chromium
       - name: Verify real Chromium interception and authenticated egress fixtures

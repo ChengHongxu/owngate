@@ -6,7 +6,7 @@
 
 | 文档 | 解决的问题 |
 |---|---|
-| [部署](../deploy/README.md) | 配置密钥、域名、HTTPS 和容器 |
+| [发布包部署](../deploy/release-README.md) · [源码部署](../deploy/README.md) | 使用版本镜像，或自行构建；配置密钥、HTTPS 和容器 |
 | [首次使用](guides/first-query.md) | 从管理员账户到第一次获准查询 |
 | [客户端接入](guides/connect-clients.md) | 把同一套授权用于 MCP、CLI 和 HTTP API |
 | [离线维护](guides/maintenance.md) | 备份、密码恢复、密钥轮换和凭据重置 |
@@ -30,6 +30,7 @@
 
 - [贡献指南](../CONTRIBUTING.md)：准备开发环境、定位代码、提交修改。
 - [测试指南](guides/testing.md)：单元测试、浏览器验收、容器隔离和证据范围。
+- [版本发布](guides/releases.md)：推送 tag、发布镜像与部署包、检查发布结果。
 - [品牌资源](brand/owngate/README.md)：当前标志与资源重新生成方式。
 
 文档随代码维护。用户操作放在指南，协议与字段放在参考，设计理由放在解释；开发记录和本机私有验收文件不作为产品文档。

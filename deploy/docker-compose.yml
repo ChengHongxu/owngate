@@ -1,5 +1,4 @@
 # owngate Docker Compose 部署
-# 设计依据：设计方案.md §12.2
 # 注意：TLS 由外部 nginx 终止，server 容器只暴露 HTTP。
 # 生成 master_key：node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
@@ -89,7 +88,7 @@ services:
       BROWSER_RPC_PORT: "4000"
       BROWSER_PROFILES_DIR: /profiles
       EGRESS_CONTROL_SECRET_FILE: /run/secrets/egress_control_secret
-      BROWSER_EGRESS_PROXY: http://egress:3128   # 设计 §4.4.1：浏览器只能经 egress 出网
+      BROWSER_EGRESS_PROXY: http://egress:3128   # 浏览器只能经 egress 出网
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     networks:
       - internal                         # 无直接出网路由
