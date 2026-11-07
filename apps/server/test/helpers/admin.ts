@@ -2,7 +2,7 @@
 // same way the web UI does, optionally upgraded with a TOTP step-up.
 //
 //   bootstrap → /auth/bootstrap (first run only)
-//   login     → /auth/login, returns the wr_session cookie
+//   login     → /auth/login, returns the og_session cookie
 //   step-up   → /auth/totp/enroll → /auth/totp/confirm → /auth/step-up/totp
 //
 // TOTP codes come from src/auth/totp.ts, so no clock mocking is needed.
@@ -18,7 +18,7 @@ export const ADMIN_USERNAME = 'admin';
 export const ADMIN_PASSWORD = 'correct horse battery';
 
 export interface AdminSession {
-  /** `wr_session=<id>`, ready for a Cookie header. */
+  /** `og_session=<id>`, ready for a Cookie header. */
   cookie: string;
   /** Spread into app.inject({ headers }). */
   headers: { cookie: string };
@@ -27,10 +27,10 @@ export interface AdminSession {
 }
 
 /** A fresh SQLite path in its own temp dir, plus a cleanup function. */
-export function tempDbPath(prefix = 'webridge-test-'): { path: string; cleanup: () => void } {
+export function tempDbPath(prefix = 'owngate-test-'): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   return {
-    path: join(dir, 'webridge.db'),
+    path: join(dir, 'owngate.db'),
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
 }
@@ -94,6 +94,8 @@ export async function loginAdmin(app: FastifyInstance, totpSecret?: string): Pro
 export async function stepUp(app: FastifyInstance, admin: AdminSession): Promise<AdminSession> {
   let secret = admin.totpSecret;
   if (secret === undefined) {
+    const setup = await app.inject({ method: 'POST', url: '/auth/mfa/setup', headers: admin.headers, payload: { password: ADMIN_PASSWORD } });
+    expectOk(setup, 'first MFA password proof');
     const enroll = await app.inject({ method: 'POST', url: '/auth/totp/enroll', headers: admin.headers });
     expectOk(enroll, 'totp enroll');
     secret = (enroll.json() as { secretBase32: string }).secretBase32;
@@ -109,7 +111,7 @@ export async function stepUp(app: FastifyInstance, admin: AdminSession): Promise
     method: 'POST',
     url: '/auth/step-up/totp',
     headers: admin.headers,
-    payload: { code: currentTotp(secret) },
+    payload: { code: currentTotp(secret), password: ADMIN_PASSWORD },
   });
   expectOk(up, 'step-up');
   return session(admin.cookie, secret);

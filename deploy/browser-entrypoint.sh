@@ -1,5 +1,5 @@
 #!/bin/sh
-# webridge-browser 容器入口
+# owngate-browser 容器入口
 # 手动启动 Xvfb 并轮询就绪后再启动 worker。
 # 不用 xvfb-run：在 Docker/WSL2 下它会等不来自就绪信号而死锁（M0 实测）。
 

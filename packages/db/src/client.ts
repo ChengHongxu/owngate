@@ -5,7 +5,7 @@ import { Worker } from 'node:worker_threads';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
-import type { DbRequest, DbResponse } from './types.js';
+import type { DbRequest, DbResponse, RawStatement, RawRunResult } from './types.js';
 import type * as schema from './schema.js';
 
 type AdminUserRow = typeof schema.admin_users.$inferSelect;
@@ -15,21 +15,19 @@ type LoginSessionRow = typeof schema.login_sessions.$inferSelect;
 type ConnectionRow = typeof schema.connections.$inferSelect;
 type ClientRow = typeof schema.clients.$inferSelect;
 type GrantRow = typeof schema.grants.$inferSelect;
+type CacheRow = typeof schema.results_cache.$inferSelect;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // In production (after build), the worker is at dist/worker.js.
 // In tests (ts-node / vitest), we use the TypeScript source via tsx/register.
 function resolveWorkerPath(): string {
-  if (process.env['WEBRIDGE_DB_WORKER_PATH']) {
-    return process.env['WEBRIDGE_DB_WORKER_PATH'];
-  }
-  return resolve(__dirname, 'worker.js');
+  return process.env['OWNGATE_DB_WORKER_PATH'] ?? resolve(__dirname, 'worker.js');
 }
 
 function resolveWorkerOptions(): { execArgv?: string[] } {
   // In test/dev environments the worker path may be a .ts file — run via tsx
-  if (process.env['WEBRIDGE_DB_WORKER_PATH']?.endsWith('.ts')) {
+  if (resolveWorkerPath().endsWith('.ts')) {
     return { execArgv: ['--import', 'tsx/esm'] };
   }
   return {};
@@ -40,6 +38,7 @@ export class DbClient {
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private nextId = 1;
   private ready: Promise<void>;
+  private failure: Error | undefined;
 
   constructor(dbPath: string) {
     this.worker = new Worker(resolveWorkerPath(), {
@@ -60,7 +59,13 @@ export class DbClient {
 
     this.worker.on('error', (err: Error) => {
       // Reject all pending requests on worker crash
+      this.failure = err;
       for (const p of this.pending.values()) p.reject(err);
+      this.pending.clear();
+    });
+    this.worker.on('exit', () => {
+      this.failure ??= new Error('DB worker is closed');
+      for (const p of this.pending.values()) p.reject(this.failure);
       this.pending.clear();
     });
 
@@ -69,6 +74,7 @@ export class DbClient {
   }
 
   private call<T>(method: string, args: unknown = {}): Promise<T> {
+    if (this.failure) return Promise.reject(this.failure);
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
@@ -78,6 +84,9 @@ export class DbClient {
   }
 
   async close(): Promise<void> {
+    this.failure ??= new Error('DB worker is closed');
+    for (const p of this.pending.values()) p.reject(this.failure);
+    this.pending.clear();
     await this.worker.terminate();
   }
 
@@ -90,7 +99,7 @@ export class DbClient {
   }
 
   // ── Connections ───────────────────────────────────────────
-  createConnection(args: { id: string; connector_id: string; label: string; config: unknown; capability_states?: unknown }) {
+  createConnection(args: { id: string; connector_id: string; label: string; config: unknown; capability_states?: unknown; paused?: boolean; scope?: string; tags?: string[] }) {
     return this.call('createConnection', args);
   }
   getConnection(id: string) {
@@ -107,8 +116,12 @@ export class DbClient {
     return this.call('updateConnectionStates', { id, capability_states, updated_at });
   }
 
+  updateConnectionConfig(id: string, config: unknown, label?: string) {
+    return this.call('updateConnectionConfig', { id, config, label });
+  }
+
   // ── Clients ────────────────────────────────────────────────
-  createClient(args: { id: string; label: string; kind: string; token_hash: string }) {
+  createClient(args: { id: string; label: string; token_hash: string; expires_at?: string | null }) {
     return this.call('createClient', args);
   }
   getClientByToken(token_hash: string) {
@@ -123,7 +136,7 @@ export class DbClient {
   }
 
   // ── Grants ─────────────────────────────────────────────────
-  upsertGrant(args: { client_id: string; connection_id: string; capabilities: unknown }) {
+  upsertGrant(args: { client_id: string; connection_id: string; capabilities: unknown; visibility?: { pii?: boolean; financial?: boolean; content?: boolean } | null }) {
     return this.call('upsertGrant', args);
   }
   getGrants(client_id: string) {
@@ -147,17 +160,20 @@ export class DbClient {
 
   // ── Cache ──────────────────────────────────────────────────
   getCacheEntry(key: string) {
-    return this.call<unknown | undefined>('getCacheEntry', { key });
+    return this.call<CacheRow | undefined>('getCacheEntry', { key });
   }
-  setCacheEntry(args: { key: string; ciphertext: string; iv: string; auth_tag: string; expires_at: string }) {
+  setCacheEntry(args: { key: string; ciphertext: string; iv: string; auth_tag: string; expires_at: string; cached_at?: string }) {
     return this.call('setCacheEntry', args);
   }
   deleteCacheEntry(key: string) {
     return this.call('deleteCacheEntry', { key });
   }
+  clearCache() {
+    return this.call('clearCache');
+  }
 
   // ── Audit log ──────────────────────────────────────────────
-  appendAuditLog(args: { action: string; client_id?: string | undefined; target?: string | undefined; detail?: unknown; prev_hash: string; entry_hash: string }) {
+  appendAuditLog(args: { action: string; client_id?: string | undefined; target?: string | undefined; detail?: unknown; prev_hash?: string; entry_hash?: string }) {
     return this.call('appendAuditLog', args);
   }
   getLastAuditEntry() {
@@ -255,5 +271,17 @@ export class DbClient {
   // ── Escape hatch for migrations ───────────────────────────
   rawQuery(sql: string, params?: unknown[]) {
     return this.call<unknown[]>('rawQuery', { sql, params });
+  }
+  /** Mutating SQL for trusted server modules. No HTTP route exposes raw SQL. */
+  rawRun(sql: string, params?: unknown[]) {
+    return this.call<RawRunResult>('rawRun', { sql, params });
+  }
+  /** Execute all statements atomically, rolling back every write on failure. */
+  rawTransaction(queries: RawStatement[]) {
+    return this.call<unknown[]>('rawTransaction', { queries });
+  }
+  /** Permanently bind this worker to a lease; losing it fences all DB calls. */
+  bindLease(owner: string): Promise<void> {
+    return this.call<void>('bindLease', { owner });
   }
 }

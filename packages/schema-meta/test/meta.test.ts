@@ -89,4 +89,60 @@ describe('findUnannotatedFields', () => {
     const json = toJSONSchema(schema);
     expect(findUnannotatedFields(json)).toEqual([]);
   });
+
+  it('finds missing annotations inside real Zod arrays and nested arrays even when their containers are annotated', () => {
+    const schema = z.object({
+      accounts: field(z.array(z.object({
+        email: z.string(),
+        balance: field(z.number(), { sensitivity: 'financial' }),
+        events: field(z.array(z.object({ body: z.string() })), { sensitivity: 'content' }),
+      })), { sensitivity: 'content' }),
+    });
+    expect(findUnannotatedFields(toJSONSchema(schema))).toEqual(['accounts[].email', 'accounts[].events[].body']);
+  });
+
+  it('walks Zod unions and intersections while leaving the existing per-property annotation requirement intact', () => {
+    const schema = z.object({
+      result: field(z.union([
+        z.object({ email: z.string() }),
+        z.object({ balance: field(z.number(), { sensitivity: 'financial' }) }),
+      ]), { sensitivity: 'content' }),
+      profile: field(z.intersection(
+        z.object({ display_name: z.string() }),
+        z.object({ bio: field(z.string(), { untrusted: true }) }),
+      ), { sensitivity: 'content' }),
+    });
+    expect(findUnannotatedFields(toJSONSchema(schema))).toEqual(['result.email', 'profile.display_name']);
+  });
+
+  it('handles nullable and implicit object types plus all composition branches, without duplicate paths', () => {
+    expect(findUnannotatedFields({
+      properties: {
+        profile: { type: ['object', 'null'], 'x-sensitivity': 'content', properties: { name: { type: 'string' } } },
+        result: { 'x-sensitivity': 'content', oneOf: [
+          { properties: { raw: { type: 'string' } } },
+          { allOf: [{ properties: { raw: { type: 'number' }, safe: { 'x-untrusted': true } } }] },
+        ] },
+      },
+    })).toEqual(['profile.name', 'result.raw']);
+  });
+
+  it('walks tuple elements and explicitly typed dynamic object values', () => {
+    const schema = {
+      properties: {
+        tuple: { 'x-sensitivity': 'content', items: [{ properties: { raw: { type: 'string' } } }, { type: 'number' }] },
+        modern: { 'x-sensitivity': 'content', prefixItems: [{ properties: { raw: { type: 'string' } } }] },
+        lookup: { 'x-sensitivity': 'content', additionalProperties: { properties: { email: { type: 'string' } } } },
+      },
+    };
+    expect(findUnannotatedFields(schema)).toEqual(['tuple[0].raw', 'modern[0].raw', 'lookup.*.email']);
+  });
+
+  it('preserves caller path prefixes, scans shared schemas at each path, and terminates in-memory cycles', () => {
+    const shared: Record<string, unknown> = { properties: { raw: { type: 'string' } } };
+    const root = { properties: { first: { 'x-sensitivity': 'content', items: shared }, second: { 'x-sensitivity': 'content', items: shared } } };
+    expect(findUnannotatedFields(root, 'payload')).toEqual(['payload.first[].raw', 'payload.second[].raw']);
+    shared['anyOf'] = [shared];
+    expect(findUnannotatedFields(root)).toEqual(['first[].raw', 'second[].raw']);
+  });
 });

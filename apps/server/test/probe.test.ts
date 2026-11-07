@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
-import type { Connection, SupportState } from '@webridge/core';
+import type { Connection, SupportState } from '@owngate/core';
 import { ProbeScheduler, NEEDS_AUTH_REASON } from '../src/probe/scheduler.js';
 import type { ProbeDeps, ProbeAuditEntry, ProbeTarget } from '../src/probe/scheduler.js';
 import { registerProbeRoutes } from '../src/routes/probe.js';
@@ -34,18 +34,20 @@ function setup(
   overrides: Partial<ProbeDeps> = {},
 ) {
   const audits: ProbeAuditEntry[] = [];
-  const updateConnectionStates = vi.fn(async (_id: string, _states: unknown, _at: string) => undefined);
+  const rawRun = vi.fn(async (_sql: string, _values?: unknown[]) => ({ changes: 1, lastInsertRowid: 0 }));
   const connectionMap = new Map(connections.map((c) => [c.id, c]));
+  let sequence = 0;
   const deps: ProbeDeps = {
-    db: { updateConnectionStates } as unknown as ProbeDeps['db'],
+    db: { rawRun } as unknown as ProbeDeps['db'],
     connectionMap,
     probe,
     resolveTarget: (c) => (c.connector_id === 'bilibili' ? TARGET : undefined),
     audit: (e) => { audits.push(e); },
+    nextSequence: () => ++sequence,
     now: () => NOW,
     ...overrides,
   };
-  return { scheduler: new ProbeScheduler(deps), audits, updateConnectionStates, connectionMap };
+  return { scheduler: new ProbeScheduler(deps), audits, rawRun, connectionMap };
 }
 
 function timeoutError(): Error {
@@ -56,7 +58,7 @@ function timeoutError(): Error {
 
 describe('ProbeScheduler', () => {
   it('isolates failures: connection A throwing does not stop B from being written back', async () => {
-    const { scheduler, updateConnectionStates, connectionMap } = setup(
+    const { scheduler, rawRun, connectionMap } = setup(
       [conn('a'), conn('b')],
       async (connectionId) => {
         if (connectionId === 'a') throw new Error('browser RPC /v1/probe → 502: boom');
@@ -70,8 +72,8 @@ describe('ProbeScheduler', () => {
       { connectionId: 'a', status: 'error', reason: 'browser RPC /v1/probe → 502: boom' },
       { connectionId: 'b', status: 'needs_auth', reason: NEEDS_AUTH_REASON },
     ]);
-    expect(updateConnectionStates).toHaveBeenCalledTimes(1);
-    expect(updateConnectionStates.mock.calls[0]?.[0]).toBe('b');
+    expect(rawRun).toHaveBeenCalledTimes(1);
+    expect(rawRun.mock.calls[0]?.[1]?.[1]).toBe('b');
     expect(connectionMap.get('a')?.capability_states).toEqual({});
     expect(connectionMap.get('b')?.capability_states['feed.home']?.status).toBe('needs_auth');
   });
@@ -80,7 +82,7 @@ describe('ProbeScheduler', () => {
     const before: Record<string, SupportState> = {
       'account.profile': { status: 'supported', probed_at: '2026-11-01T00:00:00.000Z' },
     };
-    const { scheduler, audits, updateConnectionStates, connectionMap } = setup(
+    const { scheduler, audits, rawRun, connectionMap } = setup(
       [conn('a', before)],
       async () => { throw timeoutError(); },
     );
@@ -89,14 +91,14 @@ describe('ProbeScheduler', () => {
 
     expect(result?.status).toBe('timeout');
     expect(connectionMap.get('a')?.capability_states).toEqual(before);
-    expect(updateConnectionStates).not.toHaveBeenCalled();
+    expect(rawRun).not.toHaveBeenCalled();
     expect(audits).toEqual([
       { action: 'probe.timeout', target: 'a', detail: { error: 'The operation was aborted due to timeout' } },
     ]);
   });
 
-  it('needs_auth marks every capability and persists via db.updateConnectionStates', async () => {
-    const { scheduler, audits, updateConnectionStates, connectionMap } = setup(
+  it('needs_auth marks every capability and persists via db.rawRun', async () => {
+    const { scheduler, audits, rawRun, connectionMap } = setup(
       [conn('a', { 'feed.home': { status: 'supported' } })],
       async () => ({ status: 'needs_auth', reason: 'redirected to passport' }),
     );
@@ -107,9 +109,11 @@ describe('ProbeScheduler', () => {
     for (const id of TARGET.capabilities) {
       expected[id] = { status: 'needs_auth', reason: NEEDS_AUTH_REASON, probed_at: NOW.toISOString() };
     }
-    expect(updateConnectionStates).toHaveBeenCalledWith('a', expected, NOW.toISOString());
+    const values = rawRun.mock.calls[0]?.[1] as string[];
+    expect(JSON.parse(values[0]!)).toEqual(expected);
+    expect(values.slice(1)).toEqual(['a', '2026-01-01T00:00:00.000Z', JSON.stringify({ 'feed.home': { status: 'supported' } })]);
     expect(connectionMap.get('a')?.capability_states).toEqual(expected);
-    expect(connectionMap.get('a')?.updated_at).toBe(NOW.toISOString());
+    expect(connectionMap.get('a')?.updated_at).toBe('2026-01-01T00:00:00.000Z');
     expect(audits[0]?.action).toBe('probe.needs_auth');
   });
 
@@ -126,6 +130,7 @@ describe('ProbeScheduler', () => {
 
     expect(connectionMap.get('a')?.capability_states).toEqual({
       'history.list': { status: 'disabled' },
+      'feed.home': { status: 'unverified' },
       'account.profile': { status: 'supported', probed_at: NOW.toISOString() },
     });
   });
@@ -142,12 +147,84 @@ describe('ProbeScheduler', () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
+  it('does not probe paused accounts or write capability states', async () => {
+    const connection = conn('a'); connection.paused = true;
+    const probe = vi.fn(async () => ({ status: 'supported' }));
+    const { scheduler, rawRun } = setup([connection], probe);
+    expect(await scheduler.runOnce()).toEqual([{ connectionId: 'a', status: 'skipped', reason: 'connection is paused' }]);
+    expect(probe).not.toHaveBeenCalled();
+    expect(rawRun).not.toHaveBeenCalled();
+  });
+
+  it('keeps disabled capabilities disabled after authentication fails', async () => {
+    const connection = conn('a', { 'post.create': { status: 'disabled' }, 'history.list': { status: 'disabled' } });
+    const { scheduler, connectionMap } = setup([connection], async () => ({ status: 'needs_auth' }), {
+      resolveTarget: () => ({ ...TARGET, capabilities: [...TARGET.capabilities, 'post.create'] }),
+    });
+    await scheduler.runOnce('a');
+    expect(connectionMap.get('a')?.capability_states['post.create']).toEqual({ status: 'disabled' });
+    expect(connectionMap.get('a')?.capability_states['history.list']).toEqual({ status: 'disabled' });
+    expect(connectionMap.get('a')?.capability_states['account.profile']?.status).toBe('needs_auth');
+  });
+
+  it('does not restore an account paused while its probe was in flight', async () => {
+    const connection = conn('a', { 'account.profile': { status: 'needs_auth' } });
+    const { scheduler, rawRun } = setup([connection], async () => { connection.paused = true; return { status: 'supported' }; });
+    expect(await scheduler.runOnce('a')).toEqual([{ connectionId: 'a', status: 'skipped', reason: 'connection is paused' }]);
+    expect(connection.capability_states['account.profile']?.status).toBe('needs_auth');
+    expect(rawRun).not.toHaveBeenCalled();
+  });
+
+  it('does not write an old probe result after configuration changed', async () => {
+    const connection = conn('a', { 'account.profile': { status: 'needs_auth' } });
+    const { scheduler, rawRun } = setup([connection], async () => {
+      connection.updated_at = '2026-02-01T00:00:00.000Z';
+      return { status: 'supported' };
+    });
+    expect(await scheduler.runOnce('a')).toEqual([{ connectionId: 'a', status: 'skipped', reason: 'connection changed while probing' }]);
+    expect(connection.capability_states['account.profile']?.status).toBe('needs_auth');
+    expect(rawRun).not.toHaveBeenCalled();
+  });
+
+  it('does not replace a newer observation with a late authentication failure from a probe', async () => {
+    const connection = conn('a');
+    const { scheduler, rawRun } = setup([connection], async () => {
+      connection.capability_states = { 'account.profile': { status: 'supported', probed_at: NOW.toISOString() } };
+      return { status: 'needs_auth' };
+    });
+    expect((await scheduler.runOnce('a'))[0]?.status).toBe('skipped');
+    expect(connection.capability_states['account.profile']?.status).toBe('supported');
+    expect(rawRun).not.toHaveBeenCalled();
+  });
+
+  it('a failed database revision comparison does not change in-memory observations', async () => {
+    const connection = conn('a', { 'account.profile': { status: 'supported' } });
+    const { scheduler, rawRun } = setup([connection], async () => ({ status: 'needs_auth' }));
+    rawRun.mockResolvedValueOnce({ changes: 0, lastInsertRowid: 0 });
+    expect((await scheduler.runOnce('a'))[0]?.status).toBe('skipped');
+    expect(connection.capability_states['account.profile']?.status).toBe('supported');
+  });
+
+  it('successful auth leaves unknown adapters unverified and preserves actual failures and unsupported queries', async () => {
+    const connection = conn('a', {
+      'feed.home': { status: 'needs_adapter' },
+      'history.list': { status: 'needs_adapter', probed_at: '2026-01-01T00:00:00.000Z', reason: 'Real parse failure' },
+      'unsupported.query': { status: 'unsupported' },
+    });
+    const { scheduler } = setup([connection], async () => ({ status: 'supported' }));
+    await scheduler.runOnce('a');
+    expect(connection.capability_states['account.profile']?.status).toBe('supported');
+    expect(connection.capability_states['feed.home']).toEqual({ status: 'unverified' });
+    expect(connection.capability_states['history.list']?.reason).toBe('Real parse failure');
+    expect(connection.capability_states['unsupported.query']?.status).toBe('unsupported');
+  });
+
   it('a DB write failure still blocks calls in memory and is audited', async () => {
-    const { scheduler, audits, connectionMap, updateConnectionStates } = setup(
+    const { scheduler, audits, connectionMap, rawRun } = setup(
       [conn('a')],
       async () => ({ status: 'needs_auth' }),
     );
-    updateConnectionStates.mockRejectedValueOnce(new Error('SQLITE_BUSY'));
+    rawRun.mockRejectedValueOnce(new Error('SQLITE_BUSY'));
 
     const [result] = await scheduler.runOnce('a');
 

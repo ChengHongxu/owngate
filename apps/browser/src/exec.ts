@@ -1,8 +1,12 @@
-// Capability executor — M1 stub. Real implementations (feed.list etc.) come in M2.
+// Browser capabilities execute against the connection's isolated cookie jar.
 
 import type { BrowserContext } from 'playwright'
-import { detectAuthFailure, type AuthFailure } from '@webridge/browser-runtime'
+import type { ExecutionStep, FieldMeta } from '@owngate/core'
+import { captureSocial, SOCIAL_PLATFORMS } from './social/capture.js'
+import type { Platform, ItemError } from './social/types.js'
+import { type AuthFailure } from '@owngate/browser-runtime'
 import { workerError, type WorkerError } from './errors.js'
+import type { BrowserDiagnostics } from './diagnostics.js'
 
 export interface ExecResult {
   status: 'ok' | 'error'
@@ -10,6 +14,11 @@ export interface ExecResult {
   /** `code` is always a §6.1 code (design §13.1). */
   error?: WorkerError
   meta?: unknown
+  partial?: boolean
+  fields?: Record<string, FieldMeta>
+  warnings?: string[]
+  item_errors?: ItemError[]
+  diagnostics?: ExecutionStep[]
 }
 
 /**
@@ -22,26 +31,15 @@ export async function execCapability(
   context: BrowserContext,
   capability: string,
   params: Record<string, unknown>,
-  _deadlineMs: number,
-  _signal?: AbortSignal,
+  deadlineMs: number,
+  signal?: AbortSignal,
+  connectorId = 'bilibili',
+  diagnostics?: BrowserDiagnostics,
 ): Promise<ExecResult> {
-  // §4.4.3: a login, captcha or risk-control page means needs_auth. Stop here
-  // and report it, never return empty data in its place. A context without a
-  // page (fresh relaunch, all tabs closed) gets one, so the check is never
-  // skipped. M2 handlers must run this check again after navigating.
-  const page = context.pages()[0] ?? (await context.newPage())
-  const failure = await detectAuthFailure(page)
-  if (failure) return authFailureResult(failure)
-
-  // M1 stub: return a fixed shape. Real per-capability handlers land in M2.
-  return {
-    status: 'ok',
-    data: {
-      capability,
-      params,
-      executed_at: new Date().toISOString(),
-    },
+  if (!SOCIAL_PLATFORMS.includes(connectorId as Platform)) {
+    return { status: 'error', error: workerError('CAPABILITY_UNSUPPORTED', 'this browser connector has no executor', 'choose a supported connector') }
   }
+  return captureSocial(context, connectorId as Platform, capability, params, deadlineMs, signal, {}, diagnostics)
 }
 
 const NEXT_STEP: Record<AuthFailure['code'], string> = {

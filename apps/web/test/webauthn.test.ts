@@ -34,9 +34,11 @@ describe('passkeySupport', () => {
     expect(passkeySupport(undefined)).toMatchObject({ available: false, reason: 'insecure_context' })
   })
 
-  it('mentions TOTP as the fallback', () => {
+  it('explains access requirements without promising a TOTP fallback', () => {
     expect(INSECURE_CONTEXT_MESSAGE).toContain('HTTPS')
-    expect(INSECURE_CONTEXT_MESSAGE).toContain('TOTP')
+    expect(INSECURE_CONTEXT_MESSAGE).toContain('localhost')
+    expect(INSECURE_CONTEXT_MESSAGE).not.toContain('TOTP')
+    expect(UNSUPPORTED_BROWSER_MESSAGE).not.toContain('TOTP')
   })
 })
 

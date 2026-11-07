@@ -1,5 +1,5 @@
 {
-  "name": "@webridge/connector-runtime",
+  "name": "@owngate/connector-runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,8 +14,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@webridge/core": "workspace:*",
-    "@webridge/schema-meta": "workspace:*",
+    "@owngate/core": "workspace:*",
+    "@owngate/schema-meta": "workspace:*",
     "yaml": "^2.7.0",
     "undici": "^7.10.0"
   },

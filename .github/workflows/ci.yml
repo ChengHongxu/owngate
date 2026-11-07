@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm typecheck:tests
+      - run: pnpm test
+      - name: Install Chromium for local response interception tests
+        run: pnpm --filter @owngate/browser exec playwright install --with-deps chromium
+      - name: Verify real Chromium interception and authenticated egress fixtures
+        run: OWNGATE_REAL_BROWSER_TEST=1 pnpm --filter @owngate/browser exec vitest run test/social-browser.test.ts test/egress-browser.test.ts
+      - name: Verify QR capture preserves complete live screencast frames
+        run: OWNGATE_REAL_BROWSER_TEST=1 pnpm --filter @owngate/browser-runtime exec vitest run test/screencast-browser.test.ts
+      - name: Verify product flows and mobile layouts with local API fixtures
+        run: node scripts/product-ui-smoke.mjs --out out/ui/product
+      - name: Verify real MFA setup, Passkey recovery and step-up flows
+        run: node scripts/auth-ui-smoke.mjs --out out/ui/auth
+      - name: Verify overview states, grouped navigation and durable URLs
+        run: node scripts/ui-state-smoke.mjs --out out/ui/states
+      - name: Verify stable capability cards, query dialogs and independent results
+        run: node scripts/connection-ui-smoke.mjs --out out/ui/connection
+      - name: Verify connection summaries, capability verification and authentication recovery
+        run: node scripts/connection-status-ui-smoke.mjs --out out/ui/connection-status
+      - name: Verify schema-driven result presentations and responsive layouts
+        run: node scripts/presentation-ui-smoke.mjs --out out/ui/presentation
+      - name: Verify client permission overview, field scope and setup guidance
+        run: node scripts/client-grants-ui-smoke.mjs --out out/ui/client-grants
+      - name: Verify responsive workspace layouts and modal interactions
+        run: node scripts/spatial-ui-smoke.mjs --out out/ui/spatial
+      - name: Verify account settings and persistent theme behavior
+        run: node scripts/settings-ui-smoke.mjs --out out/ui/settings
+      - name: Verify remote login frame stability and QR refresh behavior
+        run: node scripts/remote-login-ui-smoke.mjs --out out/ui/remote-login
+      - name: Upload product UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-ui-smoke
+          path: out/ui/product
+          if-no-files-found: ignore
+      - name: Upload masked auth UI screenshots and safe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-ui-smoke
+          path: out/ui/auth
+          if-no-files-found: ignore
+      - name: Upload overview states and navigation screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-state-smoke
+          path: out/ui/states
+          if-no-files-found: ignore
+      - name: Upload result presentation screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: presentation-ui-smoke
+          path: out/ui/presentation
+          if-no-files-found: ignore
+      - name: Upload capability card and query dialog screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: connection-ui-smoke
+          path: out/ui/connection
+          if-no-files-found: ignore
+      - name: Upload connection status screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: connection-status-ui-smoke
+          path: out/ui/connection-status
+          if-no-files-found: ignore
+      - name: Upload client permission screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-grants-ui-smoke
+          path: out/ui/client-grants
+          if-no-files-found: ignore
+      - name: Upload workspace layout screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spatial-ui-smoke
+          path: out/ui/spatial
+          if-no-files-found: ignore
+      - name: Upload settings screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: settings-ui-smoke
+          path: out/ui/settings
+          if-no-files-found: ignore
+      - name: Upload remote login screenshots and frame measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-login-ui-smoke
+          path: out/ui/remote-login
+          if-no-files-found: ignore
+  server-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/deploy-smoke.mjs --build
+
+  browser-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/browser-smoke.mjs --build
+
+  http-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/http-runtime-smoke.mjs --build

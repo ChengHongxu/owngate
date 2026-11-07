@@ -1,0 +1,6 @@
+.brand-mark {
+  display: block;
+  flex: 0 0 auto;
+  aspect-ratio: 1;
+  user-select: none;
+}

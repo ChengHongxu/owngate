@@ -11,7 +11,7 @@
 // A failed or timed-out wait never reads as success or as "no data": it ends in
 // `timeout` with a reason (design: 登录失效显示 needs_auth，不返回空数据).
 
-import type { LoginCondition, LoginResult } from '@webridge/browser-runtime'
+import type { LoginCondition, LoginResult } from '@owngate/browser-runtime'
 
 export type LoginStatus = 'pending' | 'success' | 'timeout' | 'idle'
 

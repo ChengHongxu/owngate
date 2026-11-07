@@ -104,16 +104,16 @@ describe('secret generation and otpauth URL', () => {
 
   it('builds a scannable otpauth:// URL', () => {
     const url = buildOtpauthUrl({
-      issuer: 'webridge',
+      issuer: 'owngate',
       accountName: 'admin@example.com',
       secretBase32: RFC_SECRET_BASE32,
     })
     const parsed = new URL(url)
     expect(parsed.protocol).toBe('otpauth:')
     expect(parsed.hostname).toBe('totp')
-    expect(parsed.pathname).toBe('/webridge:admin%40example.com')
+    expect(parsed.pathname).toBe('/owngate:admin%40example.com')
     expect(parsed.searchParams.get('secret')).toBe(RFC_SECRET_BASE32)
-    expect(parsed.searchParams.get('issuer')).toBe('webridge')
+    expect(parsed.searchParams.get('issuer')).toBe('owngate')
     expect(parsed.searchParams.get('digits')).toBe('6')
     expect(parsed.searchParams.get('period')).toBe('30')
   })

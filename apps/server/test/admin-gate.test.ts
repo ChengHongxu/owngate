@@ -85,7 +85,7 @@ describe('admin gate — every /admin route', () => {
       const res = await app.inject({
         method: r.method,
         url: concrete(r.url),
-        headers: { cookie: 'wr_session=not-a-real-session' },
+        headers: { cookie: 'og_session=not-a-real-session' },
         payload: {},
       });
       if (res.statusCode !== 401) open.push(`${label(r)} → ${res.statusCode}`);

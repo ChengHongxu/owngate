@@ -33,7 +33,7 @@ describe('envelope.ok', () => {
         },
       },
     );
-    expect(env.fields.used?.status).toBe('unknown');
+    expect(env.fields['used']?.status).toBe('unknown');
   });
 });
 
@@ -76,7 +76,7 @@ describe('envelope.partial', () => {
     expect(env.outcome).toBe('partial');
     expect(env.data).toEqual({ balance: 42 });
     expect(env.error?.code).toBe('ITEM_PARSE_FAILED');
-    expect(env.fields.history?.status).toBe('unavailable');
+    expect(env.fields['history']?.status).toBe('unavailable');
   });
 });
 

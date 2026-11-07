@@ -1,23 +1,24 @@
-# webridge Docker Compose 部署
+# owngate Docker Compose 部署
 # 设计依据：设计方案.md §12.2
 # 注意：TLS 由外部 nginx 终止，server 容器只暴露 HTTP。
 # 生成 master_key：node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
-name: webridge
+name: owngate
 
 services:
   server:
     build:
       context: ..
       dockerfile: apps/server/Dockerfile
-    image: webridge/server
+    image: owngate/server
     ports:
-      - "${PORT:-3000}:3000"          # nginx 反代到此端口，TLS 由 nginx 处理
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-3000}:3000" # 默认只供宿主 nginx 访问
     volumes:
       - server-data:/data
     secrets:
       - master_key
       - browser_rpc_secret
+      - http_runtime_secret
     networks:
       - internal
       - lan_egress
@@ -27,31 +28,67 @@ services:
       - path: .env
         required: false           # 文件由用户按 README 步骤创建，不纳入版本控制
     environment:
+      # PORT 只配置宿主机映射；容器内始终监听 3000。
+      PORT: "3000"
+      NODE_ENV: production
       # 从 Docker secret 读取主密钥，覆盖 .env 中的占位
       MASTER_KEY_HEX_FILE: /run/secrets/master_key
       # server ↔ browser RPC 的 HMAC 密钥，与 browser 服务共用同一个 secret
       BROWSER_RPC_SECRET_FILE: /run/secrets/browser_rpc_secret
       BROWSER_RPC_URL: http://browser:4000
+      HTTP_RUNTIME_URL: http://http-runtime:5000
+      HTTP_RUNTIME_SECRET_FILE: /run/secrets/http_runtime_secret
+      HTTP_BROKER_ORIGIN: http://server:3000
       # 容器内路径固定，覆盖 .env 中可能写成本机路径的值
       CONNECTORS_DIR: /app/connectors
       WEB_ROOT: /app/apps/web/dist
-      DB_PATH: /data/webridge.db
+      DB_PATH: /data/owngate.db
+    stop_grace_period: 90s
+    restart: unless-stopped
+
+  http-runtime:
+    build:
+      context: ..
+      dockerfile: packages/runtime-http/Dockerfile
+    image: owngate/http-runtime
+    secrets:
+      - source: http_runtime_secret
+        target: http_runtime_secret
+    environment:
+      HTTP_RUNTIME_SECRET_FILE: /run/secrets/http_runtime_secret
+      HTTP_BROKER_ORIGIN: http://server:3000
+      HTTP_RUNTIME_PORT: '5000'
+    networks:
+      - internal
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    security_opt:
+      - 'no-new-privileges:true'
+    mem_limit: 512m
+    pids_limit: 128
     restart: unless-stopped
 
   browser:
     build:
       context: ..
       dockerfile: apps/browser/Dockerfile
-    image: webridge/browser              # Playwright 官方镜像 + Xvfb
+    image: owngate/browser              # Playwright 官方镜像 + Xvfb
     volumes:
       - browser-profiles:/profiles
     secrets:
       - browser_rpc_secret
+      - egress_control_secret
     # 不读 .env：worker 只拿它需要的值，碰不到主密钥等 server 配置
     environment:
       BROWSER_RPC_SECRET_FILE: /run/secrets/browser_rpc_secret
       BROWSER_RPC_PORT: "4000"
       BROWSER_PROFILES_DIR: /profiles
+      EGRESS_CONTROL_SECRET_FILE: /run/secrets/egress_control_secret
       BROWSER_EGRESS_PROXY: http://egress:3128   # 设计 §4.4.1：浏览器只能经 egress 出网
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     networks:
@@ -68,18 +105,22 @@ services:
       - SYS_ADMIN                        # user/mount namespace（Chromium 沙箱）
       - SYS_CHROOT                       # 默认 seccomp 的 chroot 规则要求（实测）
     mem_limit: 8g
+    stop_grace_period: 90s
     restart: unless-stopped
 
   egress:
     build:
       context: ..
       dockerfile: services/egress-proxy/Dockerfile
-    image: webridge/egress-proxy
+    image: owngate/egress-proxy
+    secrets:
+      - egress_control_secret
     networks:
       - internal                         # 接收 browser 的代理请求
       - wan_egress                       # 唯一出网点
     environment:
       EGRESS_PROXY_PORT: "3128"
+      EGRESS_CONTROL_SECRET_FILE: /run/secrets/egress_control_secret
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     read_only: true
     user: "1000:1000"
@@ -90,6 +131,10 @@ secrets:
     file: ./secrets/master_key
   browser_rpc_secret:
     file: ./secrets/browser_rpc_secret
+  egress_control_secret:
+    file: ./secrets/egress_control_secret
+  http_runtime_secret:
+    file: ./secrets/http_runtime_secret
 
 networks:
   internal:

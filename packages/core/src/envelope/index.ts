@@ -25,6 +25,23 @@ export interface FieldMeta {
   dimension?: string;          // x-dimension
 }
 
+/** Administrator-only observations of an actual invocation, never business data. */
+export interface ExecutionStep {
+  id: string;
+  label: string;
+  status: 'success' | 'partial' | 'error' | 'skipped';
+  duration_ms: number;
+  detail?: string;
+  code?: string;
+}
+
+export interface ExecutionTrace {
+  id: string;
+  started_at: string;
+  duration_ms: number;
+  steps: ExecutionStep[];
+}
+
 export interface ResultEnvelope<T = unknown> {
   /**
    * §6 status: ok on success, partial on partial, and on error the status
@@ -55,6 +72,8 @@ export interface ResultEnvelope<T = unknown> {
   cache: { hit: boolean; cached_at: string; expires_at: string; ttl: number } | null;
   /** warnings that didn't change outcome (e.g. type mismatch in expression) */
   warnings: string[];
+  /** Only attached at the authenticated administrator response boundary. */
+  execution?: ExecutionTrace;
 }
 
 /** Helper: build a success envelope with minimal boilerplate. */

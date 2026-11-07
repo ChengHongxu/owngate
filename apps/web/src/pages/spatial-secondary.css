@@ -1,0 +1,83 @@
+.secondary-tool-grid,
+.secondary-extension-grid,
+.secondary-channel-results { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); align-items: start; gap: 18px; min-width: 0; }
+.secondary-tool-grid > .card,
+.secondary-extension-grid > .card,
+.secondary-channel-results > .card { height: 100%; min-width: 0; }
+
+.secondary-monitor-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: 24px; min-width: 0; }
+.secondary-monitor-rules,
+.secondary-monitor-channels,
+.secondary-monitor-editor { display: grid; gap: 18px; min-width: 0; }
+.secondary-monitor-rules > .card-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); align-items: start; }
+.secondary-monitor-channels .section-head { align-items: center; flex-wrap: wrap; gap: 10px; }
+.secondary-channel-list .card { padding: 18px; }
+.secondary-channel-list .card-actions { gap: 7px; }
+.secondary-channel-list .card-actions button { min-height: 34px; padding: 6px 10px; font-size: 12px; }
+
+.form.secondary-dialog-form,
+.form.secondary-form-grid,
+.secondary-control-grid,
+.form.secondary-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 20px; align-items: start; min-width: 0; }
+fieldset.secondary-control-grid { margin: 0; padding: 0; border: 0; }
+.secondary-full-row,
+.secondary-control-grid > p,
+.secondary-form-grid > p,
+.secondary-form-grid > .card-actions { grid-column: 1 / -1; }
+.secondary-control-grid > .field-label { align-self: end; min-height: 42px; }
+.secondary-email-fields { gap: 10px; margin: 0; }
+.secondary-email-fields .checkbox-label { flex-wrap: wrap; align-items: center; }
+.secondary-email-fields input[type='checkbox'] { width: 20px; height: 20px; }
+.secondary-email-fields code { overflow-wrap: anywhere; }
+
+.extension-workbench { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: start; min-width: 0; }
+.extension-workbench.with-preview { grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); }
+.extension-source-form.form { max-width: none; }
+.extension-source-form textarea { min-height: 260px; }
+.extension-preview { display: grid; gap: 14px; min-width: 0; padding-left: 24px; border-left: 1px solid var(--border); }
+.extension-preview > button { justify-self: start; }
+.extension-preview th,
+.extension-preview td { padding: 10px 9px; }
+.extension-preview th { white-space: normal; }
+.extension-preview input[type='checkbox'] { width: 20px; height: 20px; }
+.extension-preview .envelope { max-height: 300px; }
+
+.secondary-inline-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 18px; min-width: 0; }
+.secondary-inline-controls > label { flex: 1 1 240px; min-width: 0; }
+.secondary-inline-controls > .card-actions { flex: 0 1 auto; }
+.secondary-inline-controls > button { flex: 0 1 auto; }
+
+.secondary-security-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 24px; min-width: 0; }
+.secondary-security-section { display: grid; align-content: start; gap: 16px; min-width: 0; }
+.secondary-security-section .form { max-width: none; }
+.secondary-security-section .secret { min-width: 0; }
+
+.totp-enrollment { display: grid; gap: 16px; min-width: 0; container: totp / inline-size; }
+.totp-enrollment-layout { display: grid; align-items: start; gap: 20px; min-width: 0; }
+.totp-qr { width: 208px; max-width: 100%; background: #fff; }
+.totp-qr-code { display: block; width: 100%; height: auto; }
+.totp-confirm-form { min-width: 0; }
+.totp-manual { margin: 0; }
+.totp-manual > .form { margin-top: 12px; }
+@container totp (min-width: 440px) {
+  .totp-enrollment-layout { grid-template-columns: 208px minmax(0, 1fr); }
+}
+
+@media (max-width: 1120px) {
+  .secondary-monitor-layout { grid-template-columns: minmax(0, 1fr); }
+  .secondary-channel-list { grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+}
+@media (max-width: 760px) {
+  .secondary-control-grid,
+  .form.secondary-form-grid,
+  .secondary-security-grid,
+  .extension-workbench.with-preview { grid-template-columns: minmax(0, 1fr); }
+  .secondary-control-grid > .field-label { align-self: auto; min-height: 0; }
+  .extension-preview { padding-left: 0; padding-top: 20px; border-left: 0; border-top: 1px solid var(--border); }
+  .secondary-security-grid { gap: 24px; }
+}
+@media (max-width: 480px) {
+  .secondary-inline-controls > .card-actions,
+  .secondary-inline-controls > button { max-width: 100%; }
+  .secondary-inline-controls button { white-space: normal; }
+}

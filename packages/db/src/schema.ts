@@ -1,7 +1,7 @@
 // Drizzle schema definitions for all tables (design doc §14).
 // All tables live in one SQLite file, accessed via a single worker_thread (D2).
 
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, primaryKey } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 // ── 连接器与连接 ──────────────────────────────────────────
@@ -21,6 +21,9 @@ export const connections = sqliteTable('connections', {
   label: text('label').notNull(),
   config: text('config', { mode: 'json' }).notNull(),
   capability_states: text('capability_states', { mode: 'json' }).notNull().default({}),
+  paused: integer('paused', { mode: 'boolean' }).notNull().default(false),
+  scope: text('scope').notNull().default('personal'),
+  tags: text('tags', { mode: 'json' }).notNull().default([]),
   created_at: text('created_at').notNull().default(sql`(datetime('now'))`),
   updated_at: text('updated_at').notNull().default(sql`(datetime('now'))`),
 });
@@ -41,9 +44,9 @@ export const credentials = sqliteTable('credentials', {
 export const clients = sqliteTable('clients', {
   id: text('id').primaryKey(),
   label: text('label').notNull(),
-  kind: text('kind').notNull(), // mcp | cli | admin | cron
   token_hash: text('token_hash').notNull(),
   revoked: integer('revoked', { mode: 'boolean' }).notNull().default(false),
+  expires_at: text('expires_at'),
   created_at: text('created_at').notNull().default(sql`(datetime('now'))`),
 });
 
@@ -51,6 +54,7 @@ export const grants = sqliteTable('grants', {
   client_id: text('client_id').notNull().references(() => clients.id, { onDelete: 'cascade' }),
   connection_id: text('connection_id').notNull().references(() => connections.id, { onDelete: 'cascade' }),
   capabilities: text('capabilities', { mode: 'json' }).notNull(), // string[] or ['*']
+  visibility: text('visibility', { mode: 'json' }).$type<{ pii?: boolean; financial?: boolean; content?: boolean }>(),
   created_at: text('created_at').notNull().default(sql`(datetime('now'))`),
 });
 
@@ -66,6 +70,20 @@ export const tasks = sqliteTable('tasks', {
   created_at: text('created_at').notNull().default(sql`(datetime('now'))`),
   started_at: text('started_at'),
   finished_at: text('finished_at'),
+  actor_kind: text('actor_kind').notNull().default('client'),
+  actor_id: text('actor_id'),
+  input_ciphertext: text('input_ciphertext'),
+  result_ciphertext: text('result_ciphertext'),
+  no_cache: integer('no_cache', { mode: 'boolean' }).notNull().default(false),
+  safe_retry: integer('safe_retry', { mode: 'boolean' }).notNull().default(false),
+  attempts: integer('attempts').notNull().default(0),
+  max_attempts: integer('max_attempts').notNull().default(3),
+  available_at: text('available_at'),
+  lease_owner: text('lease_owner'),
+  lease_expires_at: text('lease_expires_at'),
+  heartbeat_at: text('heartbeat_at'),
+  cancel_requested_at: text('cancel_requested_at'),
+  cancellation: text('cancellation'),
 });
 
 export const task_events = sqliteTable('task_events', {
@@ -184,3 +202,11 @@ export const channel_upstream_links = sqliteTable('channel_upstream_links', {
   upstream_connection_id: text('upstream_connection_id').notNull().references(() => connections.id, { onDelete: 'cascade' }),
   created_at: text('created_at').notNull().default(sql`(datetime('now'))`),
 });
+
+export const comparison_links = sqliteTable('comparison_links', {
+  connection_id: text('connection_id').notNull().references(() => connections.id, { onDelete: 'cascade' }),
+  view_id: text('view_id').notNull(),
+  item_id: text('item_id').notNull(),
+  target_connection_id: text('target_connection_id').notNull().references(() => connections.id, { onDelete: 'cascade' }),
+  created_at: text('created_at').notNull().default(sql`(datetime('now'))`),
+}, table => [primaryKey({ columns: [table.connection_id, table.view_id, table.item_id] })]);

@@ -1,0 +1,245 @@
+# Browser queries remain unverified until tested against this connection.
+connector: xiaohongshu
+version: 0.2.0
+title: 小红书
+access: browser
+config:
+  egress_strict:
+    type: boolean
+    default: false
+    label: 仅允许站点域名
+    help: 开启后限制到清单域名，可能影响部分CDN；内网地址始终禁止
+login:
+  url: https://www.xiaohongshu.com/explore
+  success_when:
+    any:
+    - cookie:
+        name: web_session
+        domain: .xiaohongshu.com
+  whoami: account.profile
+  allowed_domains:
+  - xiaohongshu.com
+  - xhscdn.com
+  - xhscdn.net
+  - xiaohongshu.net
+capabilities:
+- id: account.profile
+  kind: query
+  effect: read
+  cache:
+    ttl: 3600
+  title: 个人资料
+  description: 截获当前登录账号正常页面发出的账号响应；成功实测后确认支持状态
+  request:
+    method: GET
+    path: /account/profile
+  presentation:
+    type: stats
+    fields:
+    - { path: nickname, label: 昵称 }
+    - { path: uid, label: 账户 ID }
+  output:
+    uid:
+      from: $.uid
+      type: string
+      unit: ''
+      scope: account
+      sensitivity: pii
+    nickname:
+      from: $.nickname
+      unit: ''
+      scope: account
+      sensitivity: pii
+      schema:
+        type: string
+        x-untrusted: true
+    face_url:
+      from: $.face_url
+      unit: ''
+      scope: account
+      sensitivity: content
+  data_time:
+    now: true
+- id: feed.list
+  kind: query
+  effect: read
+  cache:
+    ttl: 300
+  title: 信息流
+  description: 正常浏览页面并截获响应，支持关注流与推荐流；不构造站点签名，结构变化时明确失败
+  input:
+    additionalProperties: false
+    properties:
+      limit:
+        default: 20
+        maximum: 100
+        minimum: 1
+        title: 条目数
+        type: integer
+      source:
+        enum:
+        - following
+        - recommended
+        title: 信息流来源
+        type: string
+        default: recommended
+    type: object
+  request:
+    method: GET
+    path: /feed
+  presentation: { type: feed, items: $.items, max_rows: 5 }
+  output:
+    items:
+      from: $.items
+      type: array
+      schema:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+          - platform
+          - id
+          - url
+          - kind
+          - author
+          - media
+          - published_at
+          - metrics
+          properties:
+            platform:
+              type: string
+              enum:
+              - bilibili
+              - xiaohongshu
+              - zhihu
+              - x
+              x-sensitivity: content
+            id:
+              type: string
+              x-sensitivity: content
+            url:
+              type: string
+              format: uri
+              x-sensitivity: content
+              x-untrusted: true
+            kind:
+              type: string
+              enum:
+              - video
+              - note
+              - answer
+              - article
+              - post
+              x-sensitivity: content
+            author:
+              type: object
+              properties:
+                id:
+                  type:
+                  - string
+                  - 'null'
+                  x-sensitivity: pii
+                name:
+                  type:
+                  - string
+                  - 'null'
+                  x-sensitivity: pii
+                  x-untrusted: true
+              required:
+              - id
+              - name
+              additionalProperties: false
+            title:
+              type: string
+              x-sensitivity: content
+              x-untrusted: true
+            text:
+              type: string
+              x-sensitivity: content
+              x-untrusted: true
+            media:
+              type: array
+              items:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum:
+                    - image
+                    - video
+                  url:
+                    type: string
+                    format: uri
+                    x-untrusted: true
+                required:
+                - type
+                - url
+                additionalProperties: false
+              x-sensitivity: content
+            published_at:
+              type:
+              - string
+              - 'null'
+              format: date-time
+              x-sensitivity: content
+            metrics:
+              type: object
+              properties:
+                likes:
+                  type: number
+                  minimum: 0
+                  x-unit: count
+                  x-sensitivity: content
+                comments:
+                  type: number
+                  minimum: 0
+                  x-unit: count
+                  x-sensitivity: content
+                shares:
+                  type: number
+                  minimum: 0
+                  x-unit: count
+                  x-sensitivity: content
+                views:
+                  type: number
+                  minimum: 0
+                  x-unit: count
+                  x-sensitivity: content
+              additionalProperties: false
+      scope: account
+      sensitivity: content
+    next_cursor:
+      from: $.next_cursor
+      type: string
+      scope: account
+      sensitivity: content
+    has_more:
+      from: $.has_more
+      type: boolean
+      scope: account
+      sensitivity: content
+  data_time:
+    now: true
+- id: post.create
+  kind: action
+  effect: external_send
+  approval: always
+  cache: null
+  title: 发布内容（仅提案）
+  description: 仅供人工预览审批提案，未启用平台发布执行器
+  input:
+    type: object
+    additionalProperties: false
+    required:
+    - text
+    properties:
+      text:
+        type: string
+        minLength: 1
+        maxLength: 10000
+        title: 正文
+  request:
+    method: POST
+    path: /proposal-only/post
+  output: {}

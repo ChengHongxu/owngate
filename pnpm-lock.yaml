@@ -17,10 +17,10 @@ importers:
       '@fastify/websocket':
         specifier: ^11.2.0
         version: 11.3.6
-      '@webridge/browser-runtime':
+      '@owngate/browser-runtime':
         specifier: workspace:*
         version: link:../../packages/browser-runtime
-      '@webridge/core':
+      '@owngate/core':
         specifier: workspace:*
         version: link:../../packages/core
       fastify:
@@ -45,9 +45,21 @@ importers:
 
   apps/cli:
     dependencies:
-      '@webridge/core':
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.32.2
+        version: 1.32.2(zod@3.25.76)
+      '@owngate/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@owngate/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@owngate/vault':
+        specifier: workspace:*
+        version: link:../../packages/vault
+      argon2:
+        specifier: ^0.43.1
+        version: 0.43.1
       cli-table3:
         specifier: ^0.6.5
         version: 0.6.5
@@ -82,27 +94,36 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.0
         version: 1.32.2(zod@3.25.76)
+      '@owngate/connector-runtime':
+        specifier: workspace:*
+        version: link:../../packages/connector-runtime
+      '@owngate/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@owngate/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@owngate/runtime-http':
+        specifier: workspace:*
+        version: link:../../packages/runtime-http
+      '@owngate/schema-meta':
+        specifier: workspace:*
+        version: link:../../packages/schema-meta
+      '@owngate/vault':
+        specifier: workspace:*
+        version: link:../../packages/vault
       '@simplewebauthn/server':
         specifier: ^13.1.0
         version: 13.3.3
-      '@webridge/connector-runtime':
-        specifier: workspace:*
-        version: link:../../packages/connector-runtime
-      '@webridge/core':
-        specifier: workspace:*
-        version: link:../../packages/core
-      '@webridge/db':
-        specifier: workspace:*
-        version: link:../../packages/db
-      '@webridge/schema-meta':
-        specifier: workspace:*
-        version: link:../../packages/schema-meta
-      '@webridge/vault':
-        specifier: workspace:*
-        version: link:../../packages/vault
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
       argon2:
         specifier: ^0.43.0
         version: 0.43.1
+      croner:
+        specifier: ^11.0.0
+        version: 11.0.0
       fastify:
         specifier: ^5.4.0
         version: 5.12.7
@@ -128,6 +149,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@owngate/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@simplewebauthn/browser':
         specifier: ^13.3.0
         version: 13.3.0
@@ -137,6 +161,12 @@ importers:
       '@tanstack/react-router':
         specifier: ^1.120.0
         version: 1.170.46(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      lucide-react:
+        specifier: ^1.66.0
+        version: 1.66.0(@types/react@19.3.0)(react@19.3.1)
+      qrcode.react:
+        specifier: ^4.2.0
+        version: 4.2.0(react@19.3.1)
       react:
         specifier: ^19.1.0
         version: 19.3.1
@@ -153,6 +183,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^4.4.0
         version: 4.7.0(vite@6.4.5(@types/node@26.6.6)(tsx@4.23.15)(yaml@2.9.1))
+      jsqr:
+        specifier: ^1.4.0
+        version: 1.4.0
       typescript:
         specifier: ^5.8.0
         version: 5.9.3
@@ -165,13 +198,19 @@ importers:
 
   packages/browser-runtime:
     dependencies:
-      '@webridge/core':
+      '@owngate/core':
         specifier: workspace:*
         version: link:../core
       playwright:
         specifier: ^1.52.0
         version: 1.64.1
+      pngjs:
+        specifier: ^7.0.0
+        version: 7.0.0
     devDependencies:
+      '@types/pngjs':
+        specifier: ^6.0.5
+        version: 6.0.5
       typescript:
         specifier: ^5.8.0
         version: 5.9.3
@@ -181,10 +220,10 @@ importers:
 
   packages/connector-runtime:
     dependencies:
-      '@webridge/core':
+      '@owngate/core':
         specifier: workspace:*
         version: link:../core
-      '@webridge/schema-meta':
+      '@owngate/schema-meta':
         specifier: workspace:*
         version: link:../schema-meta
       undici:
@@ -203,6 +242,9 @@ importers:
 
   packages/core:
     dependencies:
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
       zod:
         specifier: ^3.25.0
         version: 3.25.76
@@ -216,7 +258,7 @@ importers:
 
   packages/db:
     dependencies:
-      '@webridge/core':
+      '@owngate/core':
         specifier: workspace:*
         version: link:../core
       better-sqlite3:
@@ -242,6 +284,22 @@ importers:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@26.6.6)(tsx@4.23.15)(yaml@2.9.1)
 
+  packages/runtime-http:
+    dependencies:
+      '@owngate/connector-runtime':
+        specifier: workspace:*
+        version: link:../connector-runtime
+      '@owngate/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/node@26.6.6)(tsx@4.23.15)(yaml@2.9.1)
+
   packages/schema-meta:
     dependencies:
       zod:
@@ -260,7 +318,7 @@ importers:
 
   packages/vault:
     dependencies:
-      '@webridge/core':
+      '@owngate/core':
         specifier: workspace:*
         version: link:../core
     devDependencies:
@@ -1189,6 +1247,9 @@ packages:
   '@types/nodemailer@6.4.24':
     resolution: {integrity: sha512-Ww4u0rT9wQNXh4JiQaIwx3QWdcOFXzOjQA2zc+jtFYNmQiT4mIUqcDin51bDFdkzKubFnQCZNK7FIHlPKQ/q9w==}
 
+  '@types/pngjs@6.0.5':
+    resolution: {integrity: sha512-0k5eKfrA83JOZPppLtS2C7OUtyNAl2wKNxfyYl9Q5g9lPkgBl/9hNyAu6HuEH2J4XmIv2znEpkDd0SaZVxW6iQ==}
+
   '@types/react-dom@19.3.0':
     resolution: {integrity: sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==}
     peerDependencies:
@@ -1388,6 +1449,10 @@ packages:
   cors@2.8.6:
     resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
     engines: {node: '>= 0.10'}
+
+  croner@11.0.0:
+    resolution: {integrity: sha512-T17ADjdttrVToyzLpLq9Xb9xzcMwpQ/M3Qs9szhh0MVNTbv6NWQ9OFYa2qlzPYXFMn+uoDlnW1IpIv6cAvFtyA==}
+    engines: {node: '>=18.0'}
 
   cross-spawn@7.0.6:
     resolution: {integrity: sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA==}
@@ -1803,6 +1868,9 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
+  jsqr@1.4.0:
+    resolution: {integrity: sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==}
+
   light-my-request@6.8.0:
     resolution: {integrity: sha512-5Q8PjoSEdtGIB8fikZsTem5vgRo4F2mR6vUKTDW/H1g6MtAt8e3duQbg/QxL5yzg6BZhor2KOUm3hhWMWLTZwg==}
 
@@ -1815,6 +1883,15 @@ packages:
 
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
+
+  lucide-react@1.66.0:
+    resolution: {integrity: sha512-8zjbi/Us+ETXqfBwmXF/FHrWGIqOdE6zT1yUdRJLQVoptomSkB0zdFWVIM667t9K8djWDaXdkBkqi2qVTuDNiw==}
+    peerDependencies:
+      '@types/react': '*'
+      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
+    peerDependenciesMeta:
+      '@types/react':
+        optional: true
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -1972,6 +2049,10 @@ packages:
     engines: {node: '>=20'}
     hasBin: true
 
+  pngjs@7.0.0:
+    resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
+    engines: {node: '>=14.19.0'}
+
   postcss@8.5.32:
     resolution: {integrity: sha512-LJlKCCAUFKOuZxipUdYw1NzIITEsPcgyOG9LkvRJvuKj/bRzbuRY0ARXvL0pWGpsZvn8jku+LMep2eU0seHp8g==}
     engines: {node: ^10 || ^12 || >=14}
@@ -1998,6 +2079,11 @@ packages:
   pvutils@1.2.0:
     resolution: {integrity: sha512-BbubeCEyTuQjVMakvJQ/Sxbc93F2pwmbsxONT/ZRrwU7Ua38d8unYTwXpTVLAKJ4BDuH9IGztCjQcd/N/39Dvg==}
     engines: {node: '>=16.0.0'}
+
+  qrcode.react@4.2.0:
+    resolution: {integrity: sha512-QpgqWi8rD9DsS9EP3z7BT+5lY5SFhsqGjpgW5DY/i3mK4M9DTBNz3ErMi8BWYEfI3L0d8GIbGmcdFAS1uIRGjA==}
+    peerDependencies:
+      react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
   qs@6.17.1:
     resolution: {integrity: sha512-jd3COkaKVgGUW+ZHyEHCG9bH7RoaaiWuMgzsIBjUMVjLAaWGWpoUAVwljVvBHxRu/2qEHnadLGZrkutYUBPQJA==}
@@ -3205,6 +3291,10 @@ snapshots:
     dependencies:
       '@types/node': 26.6.6
 
+  '@types/pngjs@6.0.5':
+    dependencies:
+      '@types/node': 24.19.2
+
   '@types/react-dom@19.3.0(@types/react@19.3.0)':
     dependencies:
       '@types/react': 19.3.0
@@ -3430,6 +3520,8 @@ snapshots:
     dependencies:
       object-assign: 4.1.1
       vary: 1.1.2
+
+  croner@11.0.0: {}
 
   cross-spawn@7.0.6:
     dependencies:
@@ -3833,6 +3925,8 @@ snapshots:
 
   json5@2.2.3: {}
 
+  jsqr@1.4.0: {}
+
   light-my-request@6.8.0:
     dependencies:
       '@fastify/deepmerge': 3.2.4
@@ -3847,6 +3941,12 @@ snapshots:
   lru-cache@5.1.1:
     dependencies:
       yallist: 3.1.1
+
+  lucide-react@1.66.0(@types/react@19.3.0)(react@19.3.1):
+    dependencies:
+      react: 19.3.1
+    optionalDependencies:
+      '@types/react': 19.3.0
 
   magic-string@0.30.21:
     dependencies:
@@ -3963,6 +4063,8 @@ snapshots:
     dependencies:
       playwright-core: 1.64.1
 
+  pngjs@7.0.0: {}
+
   postcss@8.5.32:
     dependencies:
       nanoid: 3.3.20
@@ -4001,6 +4103,10 @@ snapshots:
       tslib: 2.9.1
 
   pvutils@1.2.0: {}
+
+  qrcode.react@4.2.0(react@19.3.1):
+    dependencies:
+      react: 19.3.1
 
   qs@6.17.1:
     dependencies:

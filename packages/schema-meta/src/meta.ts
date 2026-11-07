@@ -17,26 +17,28 @@ export interface FieldMeta {
 }
 
 /** Symbol key stored directly on ZodTypeDef so postProcess can read it. */
-export const META = Symbol('webridge.fieldMeta');
+export const META = Symbol('owngate.fieldMeta');
+
+type FieldMetaDef = { [META]?: FieldMeta };
 
 /**
  * Attach field metadata to a Zod schema.
  * Stores the meta on schema._def so zod-to-json-schema's postProcess hook can read it.
  */
-export function field<T extends { _def: Record<symbol, unknown> }>(
+export function field<T extends { _def: object }>(
   schema: T,
   meta: FieldMeta,
 ): T {
-  schema._def[META] = meta;
+  (schema._def as FieldMetaDef)[META] = meta;
   return schema;
 }
 
 /** Read back metadata from a ZodTypeDef (called inside postProcess). */
-export function getFieldMetaFromDef(def: Record<symbol, unknown>): FieldMeta | undefined {
-  return def[META] as FieldMeta | undefined;
+export function getFieldMetaFromDef(def: object): FieldMeta | undefined {
+  return (def as FieldMetaDef)[META];
 }
 
 /** Read back metadata from a Zod schema instance. */
-export function getFieldMeta(schema: { _def: Record<symbol, unknown> }): FieldMeta | undefined {
+export function getFieldMeta(schema: { _def: object }): FieldMeta | undefined {
   return getFieldMetaFromDef(schema._def);
 }

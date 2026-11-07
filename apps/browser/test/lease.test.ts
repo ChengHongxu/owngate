@@ -3,7 +3,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest'
 import type { BrowserContext } from 'playwright'
-import { signRequest } from '@webridge/browser-runtime'
+import { signRequest } from '@owngate/browser-runtime'
 import { buildBrowserServer } from '../src/main.js'
 import type { ExecResult } from '../src/exec.js'
 import { FakeSessionManager, SECRET, checkBody, post, sleep, until } from './helpers.js'
@@ -17,6 +17,24 @@ beforeAll(() => {
 })
 
 describe('leases keep the browser from idle reclaim', () => {
+  it('app.close ends pending login and CDP sockets, flushes contexts, and prevents new sessions', async () => {
+    const sm = new FakeSessionManager()
+    const { app } = await buildBrowserServer({ sessionManager: sm })
+    const { stream_token } = await sm.startLogin('c1', loginUrl, { successWhen: sessdata, deadlineMs: 60_000 })
+    const path = `/v1/screencast?token=${stream_token}`
+    await app.ready()
+    const sig = signRequest('', SECRET, { method: 'GET', path })
+    const ws = await app.injectWS(path, { headers: { 'x-og-sig': sig['X-Og-Sig'], 'x-og-ts': sig['X-Og-Ts'], 'x-og-nonce': sig['X-Og-Nonce'] } })
+    await until(() => sm.leaseCount('c1') === 2)
+    await app.close()
+    await until(() => sm.leaseCount('c1') === 0)
+    expect(sm.world.launched[0]?.ctx.closed).toBe(true)
+    expect(sm.world.launched[0]?.ctx.page.cdpCommands).toContain('Page.stopScreencast')
+    await until(() => ws.readyState === 3)
+    await expect(sm.openSession('c2')).rejects.toThrow('shutting down')
+    await sm.closeAll() // duplicate shutdown is harmless
+  })
+
   it('a login wait longer than the idle timeout keeps its browser', async () => {
     const sm = new FakeSessionManager({ idleTimeoutMs: IDLE_MS })
     await sm.startLogin('c1', loginUrl, { successWhen: sessdata, deadlineMs: 60_000 })
@@ -68,9 +86,9 @@ describe('leases keep the browser from idle reclaim', () => {
       const path = `/v1/screencast?token=${stream_token}`
       await app.ready()
       // injectWS does not lower-case header names the way Node's parser does.
-      const sig = signRequest(path, SECRET)
+      const sig = signRequest('', SECRET, { method: 'GET', path })
       const ws = await app.injectWS(path, {
-        headers: { 'x-wr-sig': sig['X-Wr-Sig'], 'x-wr-ts': sig['X-Wr-Ts'] },
+        headers: { 'x-og-sig': sig['X-Og-Sig'], 'x-og-ts': sig['X-Og-Ts'], 'x-og-nonce': sig['X-Og-Nonce'] },
       })
       const closed = new Promise<number>((r) => ws.on('close', (code: number) => r(code)))
       await until(() => sm.leaseCount('c1') === 2) // login wait + socket

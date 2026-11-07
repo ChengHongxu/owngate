@@ -1,6 +1,6 @@
 // Passkey 可用性判断（纯函数）。
 // WebAuthn 只在安全上下文（https 或 localhost）下可用。用户常先用 http://<IP> 试用，
-// 那时要隐藏 Passkey 入口，TOTP 路径独立可用。
+// 那时要隐藏 Passkey 入口；其他验证方式由界面按账号状态判断。
 
 export interface WebAuthnEnv {
   isSecureContext?: boolean
@@ -11,8 +11,8 @@ export type PasskeySupport =
   | { available: true }
   | { available: false; reason: 'insecure_context' | 'unsupported_browser'; message: string }
 
-export const INSECURE_CONTEXT_MESSAGE = 'Passkey 需要 HTTPS 域名访问，当前可用 TOTP。'
-export const UNSUPPORTED_BROWSER_MESSAGE = '当前浏览器不支持 Passkey，可用 TOTP。'
+export const INSECURE_CONTEXT_MESSAGE = 'Passkey 需要通过 HTTPS 或 localhost 访问。'
+export const UNSUPPORTED_BROWSER_MESSAGE = '当前浏览器不支持 Passkey。'
 
 export function passkeySupport(env: WebAuthnEnv | undefined): PasskeySupport {
   if (env?.isSecureContext !== true) {

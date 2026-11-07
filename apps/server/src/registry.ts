@@ -1,13 +1,10 @@
-// ConnectorRegistry — manages loaded connector manifests and decrypted credentials.
-// In M1, manifests are loaded from YAML files at startup and from the database.
-// Credentials are decrypted on-demand via the Vault.
+// ConnectorRegistry manages loaded connector manifests and credentials supplied by the server.
 
-import type { Capability } from '@webridge/core'
-import { loadManifestFile } from '@webridge/connector-runtime'
-import type { CompiledConnector, LoginConfig } from '@webridge/connector-runtime'
+import { isCapabilityRoleAllowed, type Capability, type Connection } from '@owngate/core'
+import { loadManifestFile } from '@owngate/connector-runtime'
+import type { CompiledConnector, LoginConfig, OutputFieldDef } from '@owngate/connector-runtime'
 import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Vault } from '@webridge/vault'
 
 export interface ManifestEntry {
   compiled: CompiledConnector
@@ -18,8 +15,8 @@ export interface ManifestEntry {
     timeout_ms?: number
   }
   capabilityDefs: Record<string, {
-    request?: { method: string; path: string }
-    output?: Record<string, { from: string; transform?: string; unit?: string; scope?: string; sensitivity?: string }>
+    request?: { method: string; path: string; query?: Record<string, string>; readonly_paths?: string[] }
+    output?: Record<string, OutputFieldDef>
     success_when?: string
     auth_failed_when?: string
   }>
@@ -30,8 +27,6 @@ export interface ManifestEntry {
 export class ConnectorRegistry {
   private manifests = new Map<string, ManifestEntry>()
   private credentials = new Map<string, Record<string, string>>()
-
-  constructor(private vault: Vault) {}
 
   /**
    * Load all YAML manifests from the connectors directory.
@@ -67,7 +62,8 @@ export class ConnectorRegistry {
   register(connectorId: string, compiled: CompiledConnector): void {
     this.manifests.set(connectorId, {
       compiled,
-      capabilityDefs: {},
+      ...(compiled.http !== undefined ? { http: compiled.http } : {}),
+      capabilityDefs: compiled.capabilityDefs ?? {},
       ...(compiled.login !== undefined ? { login: compiled.login } : {}),
     })
   }
@@ -76,19 +72,24 @@ export class ConnectorRegistry {
     return this.manifests.get(connectorId)
   }
 
+  listManifests(): ManifestEntry[] {
+    return [...this.manifests.values()];
+  }
+
   /** Login settings (URL, success condition, whoami) declared by the connector's manifest. */
   getLogin(connectorId: string): LoginConfig | undefined {
     return this.manifests.get(connectorId)?.login
   }
 
-  getCapability(connectorId: string, capabilityId: string): Capability | undefined {
-    return this.manifests.get(connectorId)?.compiled.capabilities[capabilityId]
+  getCapability(connectorId: string, capabilityId: string, connection?: Connection): Capability | undefined {
+    const capability = this.manifests.get(connectorId)?.compiled.capabilities[capabilityId]
+    return capability && (!connection || isCapabilityRoleAllowed(connection, capability)) ? capability : undefined
   }
 
-  listCapabilities(connectorId: string): Capability[] {
+  listCapabilities(connectorId: string, connection?: Connection): Capability[] {
     const entry = this.manifests.get(connectorId)
     if (!entry) return []
-    return Object.values(entry.compiled.capabilities)
+    return Object.values(entry.compiled.capabilities).filter((capability) => !connection || isCapabilityRoleAllowed(connection, capability))
   }
 
   /** Store decrypted credentials for a connection (from vault, loaded on demand). */

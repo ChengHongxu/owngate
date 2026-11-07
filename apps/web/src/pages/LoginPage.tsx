@@ -2,6 +2,9 @@ import { useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { authApi, ApiError } from '../lib/api'
 import { describeAuthError } from '../lib/http'
+import { currentWebAuthnEnv, describeWebAuthnError, passkeySupport } from '../lib/webauthn'
+import { BrandMark } from '../components/BrandMark'
+import { Icon } from '../components/Icon'
 
 /** 首次使用：创建唯一的管理员（/auth/bootstrap） */
 export function BootstrapPage({ onDone }: { onDone: () => void }) {
@@ -28,9 +31,9 @@ export function BootstrapPage({ onDone }: { onDone: () => void }) {
         }}
       >
         <div>
-          <p className="brand-static">webridge</p>
+          <p className="brand-static"><BrandMark /><span>OwnGate</span></p>
           <h1>创建管理员</h1>
-          <p className="muted small">这是唯一的后台账号。忘记密码只能在宿主机上执行 webridge admin reset-password。</p>
+          <p className="muted small">这是唯一的后台账号。忘记密码只能在宿主机上执行 owngate admin reset-password。</p>
         </div>
         <label>
           用户名
@@ -61,6 +64,7 @@ export function BootstrapPage({ onDone }: { onDone: () => void }) {
         )}
         <div className="card-actions">
           <button className="primary" type="submit" disabled={create.isPending}>
+            <Icon name="add" />
             {create.isPending ? '创建中…' : '创建并登录'}
           </button>
         </div>
@@ -76,6 +80,8 @@ export function LoginPage({ onDone, notice }: { onDone: () => void; notice?: str
   const [password, setPassword] = useState('')
   const [totp, setTotp] = useState('')
   const [needTotp, setNeedTotp] = useState(false)
+  const support = passkeySupport(currentWebAuthnEnv())
+  const passkeyLogin = useMutation({ mutationFn: () => authApi.loginPasskey(username.trim(), password), onSuccess: onDone })
 
   const login = useMutation({
     mutationFn: () =>
@@ -105,7 +111,7 @@ export function LoginPage({ onDone, notice }: { onDone: () => void; notice?: str
         }}
       >
         <div>
-          <p className="brand-static">webridge</p>
+          <p className="brand-static"><BrandMark /><span>OwnGate</span></p>
           <h1>登录后台</h1>
           {notice && <p className="muted small">{notice}</p>}
         </div>
@@ -140,11 +146,18 @@ export function LoginPage({ onDone, notice }: { onDone: () => void; notice?: str
         )}
         {needTotp && !showError && <p className="muted small">该账号已启用 TOTP，请填写验证码。</p>}
         {showError && <p className="error-text">{describeAuthError(login.error)}</p>}
+        {passkeyLogin.isError && <p className="error-text">{passkeyLogin.error instanceof ApiError ? describeAuthError(passkeyLogin.error) : describeWebAuthnError(passkeyLogin.error)}</p>}
         <div className="card-actions">
-          <button className="primary" type="submit" disabled={login.isPending}>
+          <button className="primary" type="submit" disabled={login.isPending || passkeyLogin.isPending}>
+            <Icon name="login" />
             {login.isPending ? '登录中…' : '登录'}
           </button>
+          {support.available && <button type="button" disabled={login.isPending || passkeyLogin.isPending || !username.trim() || !password} onClick={() => passkeyLogin.mutate()}>
+            <Icon name="key" />
+            {passkeyLogin.isPending ? '等待 Passkey…' : '用密码 + Passkey 登录'}
+          </button>}
         </div>
+        <p className="muted small">丢失 TOTP 验证器时，可使用密码和已注册的 Passkey 登录，再到安全设置重新绑定。{!support.available ? ' Passkey 登录需通过 HTTPS 域名或 localhost 访问。' : ''}</p>
       </form>
     </div>
   )

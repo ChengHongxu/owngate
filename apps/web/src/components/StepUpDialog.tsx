@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ApiError, authApi, setStepUpPrompt, type AuthStatus } from '../lib/api'
 import { describeAuthError } from '../lib/http'
+import type { StepUpReason } from '../lib/http'
 import { currentWebAuthnEnv, describeWebAuthnError, passkeySupport } from '../lib/webauthn'
 
 /**
@@ -21,15 +22,19 @@ export function StepUpDialog({
   const resolverRef = useRef<((ok: boolean) => void) | null>(null)
   const [open, setOpen] = useState(false)
   const [code, setCode] = useState('')
-  const [busy, setBusy] = useState<'passkey' | 'totp' | null>(null)
+  const [password, setPassword] = useState('')
+  const [reason, setReason] = useState<StepUpReason>('step_up')
+  const [busy, setBusy] = useState<'passkey' | 'totp' | 'setup' | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
     setStepUpPrompt(
-      () =>
+      (promptReason) =>
         new Promise<boolean>((resolve) => {
           resolverRef.current = resolve
           setCode('')
+          setPassword('')
+          setReason(promptReason ?? 'step_up')
           setError('')
           setBusy(null)
           setOpen(true)
@@ -52,11 +57,15 @@ export function StepUpDialog({
     const resolve = resolverRef.current
     resolverRef.current = null
     setOpen(false)
+    setPassword('')
+    setCode('')
     resolve?.(ok)
   }
 
-  function succeed() {
-    void qc.invalidateQueries({ queryKey: ['auth-status'] })
+  async function succeed() {
+    // Complete this status read before retrying an operation that may revoke
+    // the session, so a late response cannot swallow its success feedback.
+    await qc.invalidateQueries({ queryKey: ['auth-status'] })
     settle(true)
   }
 
@@ -65,7 +74,7 @@ export function StepUpDialog({
     setError('')
     try {
       await authApi.stepUpPasskey()
-      succeed()
+      await succeed()
     } catch (e) {
       setError(e instanceof ApiError ? describeAuthError(e) : describeWebAuthnError(e))
     } finally {
@@ -77,8 +86,8 @@ export function StepUpDialog({
     setBusy('totp')
     setError('')
     try {
-      await authApi.stepUpTotp(code.trim())
-      succeed()
+      await authApi.stepUpTotp(code.trim(), password)
+      await succeed()
     } catch (e) {
       setError(describeAuthError(e))
     } finally {
@@ -86,26 +95,35 @@ export function StepUpDialog({
     }
   }
 
+  async function viaSetup() {
+    setBusy('setup'); setError('')
+    try { await authApi.proveSetupPassword(password); await succeed() }
+    catch (e) { setError(describeAuthError(e)) }
+    finally { setBusy(null) }
+  }
+
   const support = passkeySupport(currentWebAuthnEnv())
-  const canPasskey = support.available && status.passkeyCount > 0
-  const canTotp = status.totpEnabled
+  const canPasskey = reason !== 'setup' && support.available && status.passkeyCount > 0
+  const canTotp = reason !== 'setup' && status.totpEnabled && status.passkeyCount === 0
 
   return (
     <dialog
       ref={dialogRef}
       className="dialog"
-      onCancel={(e) => {
-        e.preventDefault()
-        settle(false)
-      }}
+      onCancel={(e) => e.preventDefault()}
     >
       <div className="dialog-body">
-        <p className="card-title">需要二次验证</p>
+        <p className="card-title">{reason === 'setup' ? '确认首次配置' : '需要二次验证'}</p>
         <p className="muted small">
-          这个操作会交出账号或数据。验证后 15 分钟内同类操作不再询问。
+          {reason === 'setup' ? '再次输入密码后，可在 5 分钟内配置第一种验证方式。此确认不授权其他敏感操作。' : '验证通过后 15 分钟内同类操作不再询问。已注册 Passkey 时须使用 Passkey。'}
         </p>
 
-        {support.available ? (
+        {reason === 'setup' && <form className="form tight" onSubmit={(e) => { e.preventDefault(); void viaSetup() }}>
+          <label>当前密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required autoFocus /></label>
+          <div className="card-actions"><button className="primary" type="submit" disabled={busy !== null}>{busy === 'setup' ? '验证中…' : '确认密码'}</button></div>
+        </form>}
+
+        {reason !== 'setup' && (support.available ? (
           status.passkeyCount > 0 ? (
             <div className="card-actions">
               <button className="primary" onClick={() => void viaPasskey()} disabled={busy !== null}>
@@ -115,7 +133,7 @@ export function StepUpDialog({
           ) : null
         ) : (
           <p className="muted small">{support.message}</p>
-        )}
+        ))}
 
         {canTotp && (
           <form
@@ -125,6 +143,7 @@ export function StepUpDialog({
               void viaTotp()
             }}
           >
+            <label>当前密码<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required /></label>
             <label>
               TOTP 验证码
               <input
@@ -146,10 +165,11 @@ export function StepUpDialog({
           </form>
         )}
 
-        {!canPasskey && !canTotp && (
+        {canTotp && <p className="muted small">密码与 TOTP 的保护等级较低：本机程序可能读取 TOTP 种子，建议注册 Passkey。</p>}
+        {reason !== 'setup' && !canPasskey && !canTotp && (
           <div className="card error-card">
-            <p className="muted">还没有可用的二次验证方式。</p>
-            <p className="muted small">下一步：到「安全设置」启用 TOTP{support.available ? ' 或注册 Passkey' : ''}。</p>
+            <p className="muted">{status.passkeyCount > 0 ? '当前地址或浏览器无法使用已注册的 Passkey。' : '还没有可用的二次验证方式。'}</p>
+            <p className="muted small">{status.passkeyCount > 0 ? '请通过 HTTPS 域名或支持 Passkey 的浏览器访问；全部设备丢失时需在宿主机恢复。' : `下一步：到「安全设置」启用 TOTP${support.available ? ' 或注册 Passkey' : ''}。`}</p>
             <div className="card-actions">
               <button
                 onClick={() => {

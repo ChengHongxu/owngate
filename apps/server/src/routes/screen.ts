@@ -36,6 +36,8 @@ export interface ScreenDeps {
   getLogin: (connectorId: string) => { url: string; successWhen: unknown[]; qrSelector?: string } | undefined;
   /** Append to audit_log */
   audit: (entry: { action: string; target?: string; detail?: unknown; client_id?: string }) => void;
+  /** Invalidate observations after a new login signal, without assuming auth. */
+  onLoginCompleted?: (connectionId: string, since: string) => Promise<void>;
 }
 
 export interface TicketEntry {
@@ -82,9 +84,30 @@ const STEP_UP_REQUIRED = {
 
 const WS_OPEN = 1;
 
+function validInput(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  if (JSON.stringify(input).length > 16_384) return false;
+  if (input['type'] === 'reload') return true;
+  if (input['type'] === 'text') return typeof input['text'] === 'string' && input['text'].length <= 4096;
+  if (input['type'] === 'key') {
+    return (input['event'] === 'keyDown' || input['event'] === 'keyUp') &&
+      typeof input['key'] === 'string' && input['key'].length <= 64 &&
+      typeof input['code'] === 'string' && input['code'].length <= 64;
+  }
+  if (input['type'] !== 'mouse' && input['type'] !== 'wheel') return false;
+  if (typeof input['x'] !== 'number' || !Number.isFinite(input['x']) || input['x'] < 0 || input['x'] > 20_000 ||
+    typeof input['y'] !== 'number' || !Number.isFinite(input['y']) || input['y'] < 0 || input['y'] > 20_000) return false;
+  if (input['type'] === 'mouse') return input['event'] === 'mousePressed' || input['event'] === 'mouseReleased' || input['event'] === 'mouseMoved';
+  return typeof input['deltaX'] === 'number' && Number.isFinite(input['deltaX']) && Math.abs(input['deltaX']) <= 10_000 &&
+    typeof input['deltaY'] === 'number' && Number.isFinite(input['deltaY']) && Math.abs(input['deltaY']) <= 10_000;
+}
+
 // ── Routes ───────────────────────────────────────────────────────────────
 
 export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDeps): Promise<void> {
+  const activeScreens = new Map<string, Set<{ userId: string; upstream: WebSocket }>>();
+  const completedLogins = new Map<string, string>();
   // @fastify/websocket must be registered before the upgrade route is added.
   // It is a direct dependency of this package; register it here idempotently so
   // main.ts only needs registerScreenRoutes().
@@ -186,7 +209,7 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
       // was authorised 60 s ago, but the session may have been revoked since.
       void (async () => {
         const userId = await deps.getAdminUserId(request);
-        if (userId === null || userId !== entry.userId) {
+        if (userId === null || userId !== entry.userId || !(await deps.hasStepUp(request))) {
           client.close(1008, 'unauthorized');
           return;
         }
@@ -209,9 +232,15 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
         }
 
         let closed = false;
+        const screen = { userId, upstream };
+        const screens = activeScreens.get(connectionId) ?? new Set();
+        screens.add(screen);
+        activeScreens.set(connectionId, screens);
         const closeBoth = (code: number, reason: string): void => {
           if (closed) return;
           closed = true;
+          screens.delete(screen);
+          if (screens.size === 0) activeScreens.delete(connectionId);
           try {
             upstream.close();
           } catch {
@@ -233,24 +262,30 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
           closeBoth(1011, 'upstream error');
         });
 
-        upstream.addEventListener('close', () => {
-          closeBoth(1011, 'upstream closed');
+        upstream.addEventListener('close', (event) => {
+          closeBoth(event.code === 1000 ? 1000 : 1011, 'upstream closed');
         });
 
-        // admin browser → browser worker: only input events, and only after
-        // the upgrade is open. Mouse/keyboard injection itself is a later step
-        // (see the /input route below).
+        // Preserve command order while rechecking the current session and
+        // step-up. Closing/revoking a session also stops an already open view
+        // from injecting input. Password/text contents never enter the audit.
+        let inputQueue = Promise.resolve();
+        let pendingInputs = 0;
         client.on('message', (raw: Buffer) => {
-          if (upstream.readyState !== WS_OPEN) return;
+          if (upstream.readyState !== WS_OPEN || raw.length > 16_384 || pendingInputs >= 100) return;
           const text = raw.toString();
           try {
-            const msg: unknown = JSON.parse(text);
-            if (
-              typeof msg === 'object' && msg !== null &&
-              (msg as { type?: unknown }).type === 'input'
-            ) {
-              upstream.send(text);
-            }
+            const msg = JSON.parse(text) as { type?: unknown; event?: unknown };
+            if (msg?.type !== 'input' || !validInput(msg.event)) return;
+            pendingInputs++;
+            inputQueue = inputQueue.then(async () => {
+              if (closed) return;
+              if ((await deps.getAdminUserId(request)) !== userId || !(await deps.hasStepUp(request))) {
+                closeBoth(1008, 'session or verification expired');
+                return;
+              }
+              if (upstream.readyState === WS_OPEN) upstream.send(JSON.stringify({ type: 'input', event: msg.event }));
+            }).catch(() => closeBoth(1011, 'input unavailable')).finally(() => { pendingInputs--; });
           } catch {
             // Ignore non-JSON client frames.
           }
@@ -310,6 +345,10 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
       const { connectionId } = request.params;
       try {
         const status = await deps.browserClient.loginStatus(connectionId);
+        if (status.status === 'success' && completedLogins.get(connectionId) !== status.since) {
+          await deps.onLoginCompleted?.(connectionId, status.since);
+          completedLogins.set(connectionId, status.since);
+        }
         return status;
       } catch (e) {
         return reply.status(502).send({
@@ -320,24 +359,18 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
     },
   );
 
-  // ── POST /admin/screen/:connectionId/input ─────────────────────────────
-  // TODO(§4.4.3): forward to the live screencast socket as CDP input —
-  //   mouse → Input.dispatchMouseEvent
-  //   key   → Input.dispatchKeyEvent
-  //   text  → Input.insertText (bypasses the IME, which is why CDP was chosen
-  //           over VNC — see §4.4.4)
-  // Until that lands this must fail loudly rather than accept input that goes
-  // nowhere.
+  // HTTP fallback uses an already authorised live screen, so it cannot open
+  // a second, un-ticketed remote-control path to the browser worker.
   app.post<{
     Params: { connectionId: string };
-    Body: { type: 'mouse' | 'key' | 'text' } & Record<string, unknown>;
+    Body: Record<string, unknown>;
   }>('/admin/screen/:connectionId/input', {
     schema: {
       body: {
         type: 'object',
         required: ['type'],
         properties: {
-          type: { type: 'string', enum: ['mouse', 'key', 'text'] },
+          type: { type: 'string', enum: ['mouse', 'key', 'text', 'wheel', 'reload'] },
         },
         additionalProperties: true,
       },
@@ -350,9 +383,11 @@ export async function registerScreenRoutes(app: FastifyInstance, deps: ScreenDep
       return reply.status(403).send(STEP_UP_REQUIRED);
     }
 
-    return reply.status(501).send({
-      code: 'NOT_IMPLEMENTED',
-      next_step: '输入转发在 M1 后续提交中实现',
-    });
+    if (!validInput(request.body)) return reply.status(400).send({ code: 'INVALID_PARAMS', what_happened: '输入事件格式不正确' });
+    const screen = Array.from(activeScreens.get(request.params.connectionId) ?? [])
+      .find((candidate) => candidate.userId === userId && candidate.upstream.readyState === WS_OPEN);
+    if (!screen) return reply.status(409).send({ code: 'SCREEN_NOT_OPEN', what_happened: '请先打开该连接的远程登录画面' });
+    screen.upstream.send(JSON.stringify({ type: 'input', event: request.body }));
+    return { ok: true };
   });
 }

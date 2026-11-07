@@ -1,68 +1,50 @@
-# Webridge
+# OwnGate
 
-> 将分散在不同网站上的资源与功能统一接入，为 MCP、CLI 和 Web 管理后台提供一致的接口。
+OwnGate 是自托管的个人网络资产网关。你在自己的服务中管理网站连接，再通过 **MCP、CLI 或 HTTP API**，向 Agent 和脚本开放明确授权的数据。
 
-网站接入一次，人、脚本和兼容的 AI 客户端都能使用其已授权能力。
+网站凭据保留在服务端；每个客户端使用独立令牌，按连接、能力和字段范围授权。三个入口共用权限校验、结果过滤、缓存与审计。
+
+## 当前范围
+
+项目仍处于开发阶段，面向单人自用和可信局域网，尚不适合直接暴露公网或作为多租户服务。当前以只读查询为主，生产站点写执行关闭；提案与审批框架不代表已支持网站写入。
+
+- **连接**：New API 的账户、用量与管理查询；Bilibili、知乎、小红书、X 的浏览器会话与只读能力；受限声明式 HTTP / OpenAPI 扩展。
+- **接入**：Web 后台管理连接和客户端，MCP 发现与调用能力，CLI 按连接名称查询，HTTP API 供自建应用使用。
+- **运行**：持久查询任务、UTC cron 监控、SMTP 通知；独立浏览器 profile、出网控制、加密凭据与离线恢复工具。
+
+各平台的实测范围不同。社交网站接口与风控会变化，部分数据可能未知或仅部分可用。请先阅读[实现边界](docs/explanation/product-scope.md)，不要把本地夹具测试视为所有真实平台已经通过验收。
+
+## 开始使用
+
+需要 Docker Engine 24+、Docker Compose v2，以及正式使用时提供 HTTPS 的反向代理。
+
+1. 按[部署指南](deploy/README.md)配置域名和独立密钥，启动服务。
+2. 按[首次使用](docs/guides/first-query.md)创建管理员、添加连接并完成一次只读查询。
+3. 创建限定权限的客户端，按[客户端接入](docs/guides/connect-clients.md)连接 MCP、CLI 或 HTTP API。
+
+本仓库从源码构建，不要求安装全局 CLI；CLI 构建后可用 `node apps/cli/dist/bin.js` 调用。
 
 ## 文档
 
-**只有两份有效文档**，其余历史文档已归档到 `archive/`（仅供追溯，不作为依据）。
-
-| 文件 | 内容 |
+| 你要做什么 | 入口 |
 |---|---|
-| [`需求.md`](需求.md) | 要什么。产品定位、范围、三个入口、安全要求、明确不做的事 |
-| [`设计方案.md`](设计方案.md) | 怎么做。**唯一实现依据**。开头是 13 条决策记录，然后是架构、协议、里程碑 |
+| 浏览全部用户与贡献者文档 | [文档导航](docs/README.md) |
+| 部署、备份或恢复服务 | [部署指南](deploy/README.md) · [离线维护](docs/guides/maintenance.md) |
+| 编写调用脚本或接入 Agent | [客户端接入](docs/guides/connect-clients.md) · [客户端接口参考](docs/reference/client-interfaces.md) |
+| 导入或开发连接器 | [扩展指南与格式参考](docs/extensions.md) · [New API 接口范围](connectors/newapi/README.md) |
+| 理解设计和安全边界 | [架构](docs/explanation/architecture.md) · [产品范围](docs/explanation/product-scope.md) |
+| 修改代码、运行测试或提交贡献 | [贡献指南](CONTRIBUTING.md) · [测试指南](docs/guides/testing.md) |
 
-实现中的任何架构偏离：**先改 `设计方案.md`，再改代码**。
+## 本地开发
 
-## 核心承诺
+需要 Node.js 24+、pnpm 11，具体版本以 [package.json](package.json) 为准。
 
-**一处定义，三处可用。** 一项能力只用 JSON Schema 定义一次，MCP 工具、CLI 参数、后台表单全部从它生成。鉴权、脱敏、审计、缓存只在一个 `invoke()` 里实现一次。
-
-## 技术栈
-
-TypeScript 全栈，Node.js 24 LTS。
-
-```
-后端      Fastify + MCP 官方 TS SDK + SQLite(Drizzle) + Zod
-浏览器    Playwright + Xvfb + CDP screencast（无 VNC）
-前端      React + Vite + shadcn/ui + rjsf
-部署      Docker Compose + Caddy（内部 CA，仅局域网）
-```
-
-## 里程碑
-
-| 阶段 | 内容 |
-|---|---|
-| **M0** | 完整骨架：三入口跑通、权限/脱敏/审计/缓存/任务全部就位 |
-| **M1** | 浏览器沙箱与远程登录（CDP 画面、扫码登录） |
-| **M2** | 社交信息流：B站 / 小红书 / 知乎 / X |
-| **M3** | HTTP 声明式清单与中转站（自建 newapi 双视角） |
-| **M4** | 监控与邮件通知 |
-| **M5** | 写操作框架（完整实现，不开放任何能力） |
-
-## 开始之前
-
-`设计方案.md` §16 列了三个**必须在写代码前实测**的项：
-
-1. MCP 客户端能否信任 Caddy 的内部 CA（失败则退到 `webridge mcp` stdio 转发）
-2. 二维码在 CDP 画面里能否扫出（有高清叠加方案，但要实测）
-3. Chromium 沙箱能否在 Docker/WSL2 下启动（禁止 `--no-sandbox`）
-
-## 开发环境
-
-```bash
-node --version    # >= 24
-pnpm --version
-docker compose version
+```sh
+pnpm install --frozen-lockfile
+pnpm build
+pnpm typecheck
+pnpm typecheck:tests
+pnpm test
 ```
 
-```bash
-pnpm install
-pnpm dev                         # 本地开发
-docker compose -f deploy/docker-compose.yml up    # 全栈
-```
-
-## 范围边界
-
-单用户自用，仅局域网，不做多租户、不暴露公网、本期不开放写操作。完整清单见 `需求.md` §9。
+启动开发服务前请按[贡献指南](CONTRIBUTING.md)设置持久主密钥和数据路径。真实浏览器连接还需要 browser 与 egress 服务，仅启动后台不能提供远程登录。

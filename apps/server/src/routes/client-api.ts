@@ -10,8 +10,8 @@
 // a connection the token has no grant for, so a token cannot probe for ids.
 
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { err } from '@webridge/core';
-import type { ApiError, AuthStore, Capability, ConnectionStore } from '@webridge/core';
+import { err } from '@owngate/core';
+import type { ApiError, AuthStore, Capability, ConnectionStore } from '@owngate/core';
 import {
   authenticateClient,
   extractBearerToken,

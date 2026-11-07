@@ -1,0 +1,48 @@
+.help-tip-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  vertical-align: middle;
+}
+.help-tip-button:hover:not(:disabled), .help-tip-button[aria-expanded='true'] { border: 0; background: var(--surface-alt); color: var(--link); }
+.help-tip-popup {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  gap: 7px;
+  width: min(320px, calc(100vw - 24px));
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 5px 18px rgb(0 0 0 / 0.12);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.help-tip-popup strong { font-size: 13px; font-weight: 600; }
+.help-tip-popup p + p { margin-top: 8px; }
+.help-heading, .field-label { display: flex; align-items: center; justify-content: flex-start; gap: 5px; min-width: 0; }
+.help-heading h1, .help-heading h2, .help-heading h3, .help-heading p { min-width: 0; }
+.schema-field { display: grid; gap: 7px; min-width: 0; }
+.field-label > label { display: inline; }
+@media (pointer: coarse) {
+  .help-tip-button { width: 28px; min-width: 28px; height: 28px; min-height: 28px; }
+}

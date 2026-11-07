@@ -5,35 +5,41 @@ import { AsyncMutex } from '../src/mutex.js'
 describe('HMAC request signing', () => {
   const secret = 'test-shared-secret'
   const body = JSON.stringify({ connection_id: 'conn-1', capability: 'account.profile' })
+  const target = { method: 'POST', path: '/v1/check' }
+  const signed = () => signRequest(body, secret, target)
 
   it('signs and verifies a fresh request', () => {
-    const { 'X-Wr-Sig': sig, 'X-Wr-Ts': ts } = signRequest(body, secret)
-    expect(verifyRequest(body, sig, ts, secret)).toBe(true)
+    const h = signed()
+    expect(verifyRequest(body, h['X-Og-Sig'], h['X-Og-Ts'], secret, target, h['X-Og-Nonce'])).toBe(true)
   })
 
-  it('rejects a body that was tampered with after signing', () => {
-    const { 'X-Wr-Sig': sig, 'X-Wr-Ts': ts } = signRequest(body, secret)
-    expect(verifyRequest(body + ' ', sig, ts, secret)).toBe(false)
+  it('binds body, method, path, timestamp and nonce', () => {
+    const h = signed()
+    const verify = (value = body, route = target, ts = h['X-Og-Ts'], nonce = h['X-Og-Nonce']) =>
+      verifyRequest(value, h['X-Og-Sig'], ts, secret, route, nonce)
+    expect(verify(body + ' ')).toBe(false)
+    expect(verify(body, { ...target, method: 'DELETE' })).toBe(false)
+    expect(verify(body, { ...target, path: '/v1/session/close' })).toBe(false)
+    expect(verify(body, target, String(Number(h['X-Og-Ts']) + 1))).toBe(false)
+    expect(verify(body, target, h['X-Og-Ts'], '00'.repeat(16))).toBe(false)
+  })
+
+  it('uses a fresh nonce on every signing call', () => {
+    expect(signed()['X-Og-Nonce']).not.toBe(signed()['X-Og-Nonce'])
   })
 
   it('rejects a signature made with a different secret', () => {
-    const { 'X-Wr-Sig': sig, 'X-Wr-Ts': ts } = signRequest(body, 'other-secret')
-    expect(verifyRequest(body, sig, ts, secret)).toBe(false)
+    const h = signRequest(body, 'other-secret', target)
+    expect(verifyRequest(body, h['X-Og-Sig'], h['X-Og-Ts'], secret, target, h['X-Og-Nonce'])).toBe(false)
   })
 
-  it('rejects a timestamp outside the ±30s window', () => {
-    const { 'X-Wr-Sig': sig } = signRequest(body, secret)
-    const staleTs = String(Date.now() - 60_000)
-    expect(verifyRequest(body, sig, staleTs, secret)).toBe(false)
-  })
-
-  it('rejects a non-numeric timestamp', () => {
-    const { 'X-Wr-Sig': sig } = signRequest(body, secret)
-    expect(verifyRequest(body, sig, 'not-a-number', secret)).toBe(false)
-  })
-
-  it('rejects a signature of the wrong length without throwing', () => {
-    expect(verifyRequest(body, 'abcd', String(Date.now()), secret)).toBe(false)
+  it('rejects stale, invalid timestamps and malformed signatures', () => {
+    const h = signed()
+    for (const ts of [String(Date.now() - 60_000), 'not-a-number']) {
+      expect(verifyRequest(body, h['X-Og-Sig'], ts, secret, target, h['X-Og-Nonce'])).toBe(false)
+    }
+    expect(verifyRequest(body, 'abcd', h['X-Og-Ts'], secret, target, h['X-Og-Nonce'])).toBe(false)
+    expect(verifyRequest(body, 'zz'.repeat(32), h['X-Og-Ts'], secret, target, h['X-Og-Nonce'])).toBe(false)
   })
 })
 

@@ -17,17 +17,22 @@ export class XvfbManager {
    */
   private starting = new Map<string, Promise<DisplayEntry>>()
   private nextDisplay = 10
+  private activeStarts = 0
+  private cleanupAttached = false
+  private readonly cleanupOnExit = () => {
+    for (const entry of this.entries.values()) killQuietly(entry.pid)
+  }
 
-  constructor() {
-    process.on('exit', () => {
-      for (const [, entry] of this.entries) {
-        try {
-          process.kill(entry.pid)
-        } catch {
-          // ignore — process may already be gone
-        }
-      }
-    })
+  private attachExitCleanup(): void {
+    if (this.cleanupAttached) return
+    this.cleanupAttached = true
+    process.on('exit', this.cleanupOnExit)
+  }
+
+  private releaseExitCleanupIfIdle(): void {
+    if (!this.cleanupAttached || this.entries.size || this.activeStarts) return
+    process.off('exit', this.cleanupOnExit)
+    this.cleanupAttached = false
   }
 
   async start(connectionId: string): Promise<{ display: string; pid: number }> {
@@ -36,6 +41,8 @@ export class XvfbManager {
     const inflight = this.starting.get(connectionId)
     if (inflight) return inflight
 
+    this.activeStarts++
+    this.attachExitCleanup()
     const started = this.spawnDisplay()
       .then((entry) => {
         // stop() during the start removed the marker: do not resurrect the entry.
@@ -48,6 +55,8 @@ export class XvfbManager {
       })
       .finally(() => {
         if (this.starting.get(connectionId) === started) this.starting.delete(connectionId)
+        this.activeStarts--
+        this.releaseExitCleanupIfIdle()
       })
     this.starting.set(connectionId, started)
     return started
@@ -105,9 +114,11 @@ export class XvfbManager {
       await inflight.catch(() => undefined)
     }
     const entry = this.entries.get(connectionId)
-    if (!entry) return
-    this.entries.delete(connectionId)
-    killQuietly(entry.pid)
+    if (entry) {
+      this.entries.delete(connectionId)
+      killQuietly(entry.pid)
+    }
+    this.releaseExitCleanupIfIdle()
   }
 
   getDisplay(connectionId: string): string | undefined {

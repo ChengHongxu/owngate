@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { buildBrowserServer } from '../src/main.js'
-import { signRequest } from '@webridge/browser-runtime'
+import { signRequest } from '@owngate/browser-runtime'
 
 const SECRET = 'test-rpc-secret'
 
@@ -17,11 +17,11 @@ afterAll(async () => {
   await app.close()
 })
 
-function signed(body: unknown): Record<string, string> {
+function signed(body: unknown, path = '/v1/session/close'): Record<string, string> {
   const raw = JSON.stringify(body)
   return {
     'content-type': 'application/json',
-    ...signRequest(raw, SECRET),
+    ...signRequest(raw, SECRET, { method: 'POST', path }),
   }
 }
 
@@ -45,14 +45,15 @@ describe('browser RPC HMAC auth', () => {
 
   it('rejects a wrong signature', async () => {
     const body = { connection_id: 'conn-1' }
-    const { 'X-Wr-Ts': ts } = signRequest(JSON.stringify(body), 'wrong-secret')
+    const { 'X-Og-Ts': ts, 'X-Og-Nonce': nonce } = signRequest(JSON.stringify(body), 'wrong-secret', { method: 'POST', path: '/v1/session/close' })
     const resp = await app.inject({
       method: 'POST',
       url: '/v1/session/close',
       headers: {
         'content-type': 'application/json',
-        'X-Wr-Sig': 'ab'.repeat(32),
-        'X-Wr-Ts': ts,
+        'X-Og-Sig': 'ab'.repeat(32),
+        'X-Og-Ts': ts,
+        'X-Og-Nonce': nonce,
       },
       payload: body,
     })
@@ -61,14 +62,15 @@ describe('browser RPC HMAC auth', () => {
 
   it('rejects a stale timestamp', async () => {
     const body = { connection_id: 'conn-1' }
-    const { 'X-Wr-Sig': sig } = signRequest(JSON.stringify(body), SECRET)
+    const { 'X-Og-Sig': sig, 'X-Og-Nonce': nonce } = signRequest(JSON.stringify(body), SECRET, { method: 'POST', path: '/v1/session/close' })
     const resp = await app.inject({
       method: 'POST',
       url: '/v1/session/close',
       headers: {
         'content-type': 'application/json',
-        'X-Wr-Sig': sig,
-        'X-Wr-Ts': String(Date.now() - 120_000),
+        'X-Og-Sig': sig,
+        'X-Og-Ts': String(Date.now() - 120_000),
+        'X-Og-Nonce': nonce,
       },
       payload: body,
     })
@@ -86,6 +88,21 @@ describe('browser RPC HMAC auth', () => {
     expect(resp.statusCode).toBe(200)
     expect(JSON.parse(resp.body)).toEqual({ ok: true })
   })
+
+  it('rejects a captured request replay and a refreshed timestamp', async () => {
+    const body = { connection_id: 'replay-test' }
+    const headers = signed(body)
+    const request = { method: 'POST' as const, url: '/v1/session/close', headers, payload: body }
+    expect((await app.inject(request)).statusCode).toBe(200)
+    expect((await app.inject(request)).statusCode).toBe(401)
+    expect((await app.inject({ ...request, headers: { ...headers, 'X-Og-Ts': String(Number(headers['X-Og-Ts']) + 1) } })).statusCode).toBe(401)
+  })
+
+  it('rejects a signature reused for a different POST endpoint', async () => {
+    const body = { connection_id: 'route-test' }
+    const response = await app.inject({ method: 'POST', url: '/v1/login/stop', headers: signed(body), payload: body })
+    expect(response.statusCode).toBe(401)
+  })
 })
 
 describe('browser RPC protocol shapes', () => {
@@ -94,7 +111,7 @@ describe('browser RPC protocol shapes', () => {
     const resp = await app.inject({
       method: 'POST',
       url: '/v1/cancel',
-      headers: signed(body),
+      headers: signed(body, '/v1/cancel'),
       payload: body,
     })
     expect(resp.statusCode).toBe(200)

@@ -5,7 +5,9 @@
 import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { isKnownTransform } from './transforms.js';
-import type { Capability, JSONSchema, Transport } from '@webridge/core';
+import { compilePresentation } from './presentation.js';
+import { compileConnectorViews, compileVerification } from './connector-views.js';
+import type { Capability, ComparisonView, JSONSchema, Transport, VerificationPlan } from '@owngate/core';
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -29,10 +31,13 @@ export interface CompiledConnector {
   title: string;
   transport: Transport;
   capabilities: Record<string, Capability>;
+  views?: ComparisonView[];
+  verification?: VerificationPlan;
   login?: LoginConfig;
   // Manifest blocks preserved for runtime use (dispatcher, registry)
   config?: Record<string, unknown>;
   auth?: { type: string; fields?: Record<string, unknown> };
+  discovery?: { quota_ratio: { path: string; from: string } };
   http?: {
     base: string;
     headers?: Record<string, string>;
@@ -41,7 +46,8 @@ export interface CompiledConnector {
   };
   // Per-capability runtime definitions (request, output mapping, conditions)
   capabilityDefs?: Record<string, {
-    request: { method: string; path: string };
+    roles?: Array<'user' | 'admin'>;
+    request: { method: string; path: string; query?: Record<string, string>; readonly_paths?: string[] };
     output?: Record<string, OutputFieldDef>;
     success_when?: string;
     auth_failed_when?: string;
@@ -54,8 +60,10 @@ export interface CompiledConnector {
 type AccessKind = 'official_api' | 'private_api' | 'browser';
 type SensitivityKind = 'pii' | 'financial' | 'content';
 
-interface OutputFieldDef {
+export interface OutputFieldDef {
   from: string;
+  type?: string;
+  schema?: JSONSchema;
   transform?: string;
   unit?: string;
   scope?: string;
@@ -70,10 +78,13 @@ interface CapabilityDef {
   cache: { ttl: number } | null;
   title: string;
   description: string;
-  request: { method: string; path: string };
+  input?: JSONSchema;
+  roles?: Array<'user' | 'admin'>;
+  request: { method: string; path: string; query?: Record<string, string>; readonly_paths?: string[] };
   success_when?: string;
   auth_failed_when?: string;
   output?: Record<string, OutputFieldDef>;
+  presentation?: unknown;
   data_time?: { now: true };
 }
 
@@ -84,6 +95,7 @@ interface ManifestRaw {
   access: AccessKind;
   config?: Record<string, unknown>;
   auth?: { type: string; fields?: Record<string, unknown> };
+  discovery?: { quota_ratio: { path: string; from: string } };
   http?: {
     base: string;
     headers?: Record<string, string>;
@@ -91,6 +103,8 @@ interface ManifestRaw {
     timeout_ms?: number;
   };
   capabilities: CapabilityDef[];
+  views?: unknown;
+  verification?: unknown;
   login?: LoginConfig;
 }
 
@@ -189,14 +203,15 @@ function compileOutputSchema(
       );
     }
 
+    const numeric = ['quota_to_usd', 'seconds_to_ms', 'ms_to_seconds', 'iso_to_unix', 'number_or_null'];
     const prop: JSONSchema = {
-      type: 'string',
+      ...(def.schema ?? { type: [def.type ?? (numeric.includes(def.transform ?? '') ? 'number' : 'string'), 'null'] }),
       'x-from': def.from,
     };
     if (def.transform !== undefined) prop['x-transform'] = def.transform;
     if (def.unit !== undefined) prop['x-unit'] = def.unit;
     if (def.scope !== undefined) prop['x-scope'] = def.scope;
-    if (def.sensitivity !== undefined) prop['x-sensitivity'] = def.sensitivity;
+    prop['x-sensitivity'] = def.sensitivity ?? def.schema?.['x-sensitivity'] ?? 'content';
     properties[name] = prop;
     required.push(name);
   }
@@ -269,6 +284,7 @@ function compileCapability(def: CapabilityDef, transport: Transport): Capability
   }
 
   const outputSchema = compileOutputSchema(def.output, id);
+  const presentation = compilePresentation(def.presentation, outputSchema, `capability "${id}" presentation`);
 
   return {
     id,
@@ -277,15 +293,17 @@ function compileCapability(def: CapabilityDef, transport: Transport): Capability
     description: def.description,
     effect: effect as Capability['effect'],
     approval: approval as Capability['approval'],
-    input: { type: 'object' } as JSONSchema,
+    input: def.input ?? { type: 'object', additionalProperties: false },
     output: outputSchema,
+    ...(presentation ? { presentation } : {}),
     cache,
     long_running: false,
     cancel: 'none',
     idempotency: 'none',
     verify: null,
     transport,
-    support: { status: 'supported' },
+    support: kind === 'action' ? { status: 'disabled' } : transport === 'browser' ? { status: 'unverified', reason: '尚未在当前连接中验证' } : { status: 'supported' },
+    ...(def.roles ? { roles: def.roles } : {}),
   };
 }
 
@@ -451,6 +469,16 @@ function validateManifest(raw: unknown): ManifestRaw {
     }
   }
 
+  let discovery: ManifestRaw['discovery'];
+  if (root['discovery'] !== undefined) {
+    const block = asObject(root['discovery'], 'manifest.discovery');
+    const ratio = asObject(block['quota_ratio'], 'manifest.discovery.quota_ratio');
+    discovery = { quota_ratio: {
+      path: requireString(ratio, 'path', 'manifest.discovery.quota_ratio'),
+      from: requireString(ratio, 'from', 'manifest.discovery.quota_ratio'),
+    } };
+  }
+
   if (!Array.isArray(root["capabilities"]) || root["capabilities"].length === 0) {
     throw new Error('manifest.capabilities must be a non-empty array');
   }
@@ -497,6 +525,37 @@ function validateManifest(raw: unknown): ManifestRaw {
     const requestObj = asObject(capRaw["request"], `manifest.capabilities[${i}].request`);
     const method = requireString(requestObj, 'method', `manifest.capabilities[${i}].request`);
     const path = requireString(requestObj, 'path', `manifest.capabilities[${i}].request`);
+    let query: Record<string, string> | undefined;
+    if (requestObj['query'] !== undefined) {
+      const rawQuery = asObject(requestObj['query'], `manifest.capabilities[${i}].request.query`);
+      query = {};
+      for (const [field, name] of Object.entries(rawQuery)) {
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field) || typeof name !== 'string' || !name || name.length > 100 || /[\r\n\0]/.test(name)) throw new Error(`capability "${capId}": invalid query mapping`);
+        query[field] = name;
+      }
+    }
+    let readonlyPaths: string[] | undefined;
+    if (requestObj['readonly_paths'] !== undefined) {
+      const paths = requestObj['readonly_paths'];
+      if (method !== 'ADAPTER' || kind !== 'query' || effect !== 'read') throw new Error(`capability "${capId}": readonly_paths is only allowed for a read-only ADAPTER query`);
+      if (!Array.isArray(paths) || paths.length > 10 || paths.some((value) => typeof value !== 'string')) throw new Error(`capability "${capId}": readonly_paths must contain at most 10 paths`);
+      readonlyPaths = [];
+      for (const value of paths as string[]) {
+        if (!value.startsWith('/') || value.startsWith('//') || value.length > 2000 || /[\\\r\n\0#]/.test(value)) throw new Error(`capability "${capId}": readonly_paths requires same-origin absolute paths`);
+        const plain = value.replace(/\{\{\s*input\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, '/placeholder');
+        if (/[{}]/.test(plain)) throw new Error(`capability "${capId}": readonly_paths only supports input field templates`);
+        const input = capRaw['input'] === undefined ? {} : asObject(capRaw['input'], `capability ${capId} input`);
+        const properties = input['properties'] === undefined ? {} : asObject(input['properties'], `capability ${capId} input properties`);
+        for (const match of value.matchAll(/\{\{\s*input\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)) {
+          const field = properties[match[1]!];
+          const type = typeof field === 'object' && field !== null ? (field as Record<string, unknown>)['type'] : undefined;
+          const types = Array.isArray(type) ? type.filter((entry) => entry !== 'null') : [type];
+          if (types.length !== 1 || !['string', 'number', 'integer', 'boolean'].includes(String(types[0]))) throw new Error(`capability "${capId}": readonly_paths requires a declared scalar input field`);
+        }
+        if (readonlyPaths.includes(value)) throw new Error(`capability "${capId}": readonly_paths contains duplicate paths`);
+        readonlyPaths.push(value);
+      }
+    }
 
     // output fields
     let output: Record<string, OutputFieldDef> | undefined;
@@ -511,6 +570,14 @@ function validateManifest(raw: unknown): ManifestRaw {
           `manifest.capabilities[${i}].output.${name}`,
         );
         const def: OutputFieldDef = { from };
+        if (fieldObj['type'] !== undefined) {
+          const type = fieldObj['type'];
+          if (typeof type !== 'string' || !['string', 'number', 'integer', 'boolean', 'array', 'object'].includes(type)) {
+            throw new Error(`capability "${capId}" output field "${name}": invalid type`);
+          }
+          def.type = type;
+        }
+        if (fieldObj['schema'] !== undefined) def.schema = asObject(fieldObj['schema'], `capability ${capId} output ${name} schema`);
         if (fieldObj["transform"] !== undefined) {
           if (typeof fieldObj["transform"] !== 'string' || fieldObj["transform"].length === 0) {
             throw new Error(
@@ -557,9 +624,18 @@ function validateManifest(raw: unknown): ManifestRaw {
       cache,
       title: capTitle,
       description: capDesc,
-      request: { method, path },
+      request: { method, path, ...(query ? { query } : {}), ...(readonlyPaths ? { readonly_paths: readonlyPaths } : {}) },
+      ...(capRaw['input'] !== undefined ? { input: asObject(capRaw['input'], `capability ${capId} input`) } : {}),
       ...(output !== undefined ? { output } : {}),
+      ...(capRaw['presentation'] !== undefined ? { presentation: capRaw['presentation'] } : {}),
     };
+    if (capRaw['roles'] !== undefined) {
+      const roles = capRaw['roles'];
+      if (!Array.isArray(roles) || !roles.length || roles.some((role) => role !== 'user' && role !== 'admin')) {
+        throw new Error(`capability "${capId}": roles must be a non-empty array of user | admin`);
+      }
+      capDef.roles = [...new Set(roles)] as Array<'user' | 'admin'>;
+    }
     if (typeof capRaw['approval'] === 'string') capDef.approval = capRaw['approval'];
     if (typeof capRaw["success_when"] === 'string') capDef.success_when = capRaw["success_when"];
     if (typeof capRaw["auth_failed_when"] === 'string') capDef.auth_failed_when = capRaw["auth_failed_when"];
@@ -577,7 +653,10 @@ function validateManifest(raw: unknown): ManifestRaw {
     ...(config !== undefined ? { config } : {}),
     ...(auth !== undefined ? { auth } : {}),
     ...(http !== undefined ? { http } : {}),
+    ...(discovery !== undefined ? { discovery } : {}),
     capabilities,
+    ...(root['views'] !== undefined ? { views: root['views'] } : {}),
+    ...(root['verification'] !== undefined ? { verification: root['verification'] } : {}),
     ...(login !== undefined ? { login } : {}),
   };
 }
@@ -589,7 +668,8 @@ export function loadManifest(yamlString: string): CompiledConnector {
   const transport = transportForAccess(manifest.access);
   const capabilities: Record<string, Capability> = {};
   const capabilityDefs: Record<string, {
-    request: { method: string; path: string };
+    roles?: Array<'user' | 'admin'>;
+    request: { method: string; path: string; query?: Record<string, string>; readonly_paths?: string[] };
     output?: Record<string, OutputFieldDef>;
     success_when?: string;
     auth_failed_when?: string;
@@ -599,6 +679,7 @@ export function loadManifest(yamlString: string): CompiledConnector {
   for (const def of manifest.capabilities) {
     capabilities[def.id] = compileCapability(def, transport);
     capabilityDefs[def.id] = {
+      ...(def.roles ? { roles: def.roles } : {}),
       request: def.request,
       ...(def.output ? { output: def.output } : {}),
       ...(def.success_when ? { success_when: def.success_when } : {}),
@@ -607,16 +688,22 @@ export function loadManifest(yamlString: string): CompiledConnector {
     };
   }
 
+  const views = compileConnectorViews(manifest.views, capabilities, manifest.config);
+  const verification = compileVerification(manifest.verification, capabilities);
+
   return {
     id: manifest.connector,
     version: manifest.version,
     title: manifest.title,
     transport,
     capabilities,
+    ...(views !== undefined ? { views } : {}),
+    ...(verification !== undefined ? { verification } : {}),
     ...(manifest.login !== undefined ? { login: manifest.login } : {}),
     ...(manifest.config !== undefined ? { config: manifest.config } : {}),
     ...(manifest.auth !== undefined ? { auth: manifest.auth } : {}),
     ...(manifest.http !== undefined ? { http: manifest.http } : {}),
+    ...(manifest.discovery !== undefined ? { discovery: manifest.discovery } : {}),
     capabilityDefs,
   };
 }

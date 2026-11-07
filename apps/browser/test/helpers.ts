@@ -5,8 +5,8 @@
 import { EventEmitter } from 'node:events'
 import type { BrowserContext } from 'playwright'
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify'
-import { BrowserPool, XvfbManager, signRequest } from '@webridge/browser-runtime'
-import type { BrowserPoolOptions } from '@webridge/browser-runtime'
+import { BrowserPool, XvfbManager, signRequest } from '@owngate/browser-runtime'
+import type { BrowserPoolOptions } from '@owngate/browser-runtime'
 import { SessionManager } from '../src/session.js'
 
 export const SECRET = 'test-rpc-secret'
@@ -17,7 +17,7 @@ export class FakeXvfb extends XvfbManager {
   }
   override async stop() {}
 }
-// One instance: every XvfbManager adds a process 'exit' listener.
+// One fake display backend shared by the pools in this worker.
 export const fakeXvfb = new FakeXvfb()
 
 export interface FakeCookie {
@@ -33,21 +33,27 @@ export class FakePage {
   /** Visible text, for detectAuthFailure's risk-control check. */
   text = ''
   cdpCommands: string[] = []
+  cdpEvents: { method: string; params: unknown }[] = []
   constructor(private readonly world: FakeWorld) {}
   /** Enough of the CDP surface for ScreencastSession. */
   context() {
     return {
       newCDPSession: async () => ({
-        send: async (method: string) => {
+        send: async (method: string, params?: unknown) => {
           this.cdpCommands.push(method)
+          this.cdpEvents.push({ method, params })
           return {}
         },
         on: () => undefined,
+        detach: async () => undefined,
       }),
     }
   }
   async screenshot() {
     return Buffer.from('png')
+  }
+  viewportSize() {
+    return { width: 1280, height: 800 }
   }
 
   url() {
@@ -172,13 +178,13 @@ export function post(app: FastifyInstance, url: string, body: unknown): Promise<
   return app.inject({
     method: 'POST',
     url,
-    headers: { 'content-type': 'application/json', ...signRequest(JSON.stringify(body), SECRET) },
+    headers: { 'content-type': 'application/json', ...signRequest(JSON.stringify(body), SECRET, { method: 'POST', path: url }) },
     payload: JSON.stringify(body),
   })
 }
 
 export function signedGet(app: FastifyInstance, url: string): Promise<LightMyRequestResponse> {
-  return app.inject({ method: 'GET', url, headers: signRequest(url, SECRET) })
+  return app.inject({ method: 'GET', url, headers: signRequest('', SECRET, { method: 'GET', path: url }) })
 }
 
 let execSeq = 0

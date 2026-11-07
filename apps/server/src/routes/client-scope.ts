@@ -3,10 +3,11 @@
 // client-token REST listing (GET /api/connections...) and the MCP
 // list_connections tool, so CLI and MCP always list the same thing.
 
-import { err } from '@webridge/core';
+import { err, isCapabilityRoleAllowed, isClientExpired } from '@owngate/core';
 import type {
   ApiError, AuthStore, Capability, Client, Connection, ConnectionStore, Grant,
-} from '@webridge/core';
+} from '@owngate/core';
+import { effectiveCapabilityState } from '../connection-status.js';
 
 export type ClientAuthResult =
   | { ok: true; client: Client }
@@ -33,6 +34,7 @@ export function authenticateClient(
   const client = token === null ? undefined : auth.getClient(hashToken(token));
   if (client === undefined) return { ok: false, error: err('UNAUTHENTICATED', 'Invalid or expired token') };
   if (client.revoked) return { ok: false, error: err('CLIENT_REVOKED', 'This client has been revoked') };
+  if (isClientExpired(client)) return { ok: false, error: err('UNAUTHENTICATED', 'This client token has expired') };
   return { ok: true, client };
 }
 
@@ -53,7 +55,7 @@ export function findGrantedConnection(
   connections: ConnectionStore,
 ): { grant: Grant; connection: Connection } | undefined {
   const grant = auth.getGrants(clientId).find((g) => g.connection_id === connectionId);
-  if (grant === undefined) return undefined;
+  if (grant === undefined || grant.capabilities.length === 0) return undefined;
   const connection = connections.get(connectionId);
   if (connection === undefined) return undefined;
   return { grant, connection };
@@ -67,6 +69,7 @@ export function listGrantedConnections(
 ): VisibleConnection[] {
   const out: VisibleConnection[] = [];
   for (const grant of auth.getGrants(clientId)) {
+    if (grant.capabilities.length === 0) continue;
     const connection = connections.get(grant.connection_id);
     if (connection === undefined) continue;
     out.push({
@@ -91,6 +94,6 @@ export function listGrantedCapabilities(
 ): Capability[] {
   const wildcard = grant.capabilities.includes('*');
   return all
-    .filter((cap) => (wildcard ? cap.kind === 'query' : grant.capabilities.includes(cap.id)))
-    .map((cap) => ({ ...cap, support: connection.capability_states[cap.id] ?? cap.support }));
+    .filter((cap) => isCapabilityRoleAllowed(connection, cap) && ((wildcard && cap.kind === 'query') || grant.capabilities.includes(cap.id) || (cap.kind === 'action' && grant.capabilities.includes(`propose:${cap.id}`))))
+    .map((cap) => ({ ...cap, support: effectiveCapabilityState(cap, connection.capability_states[cap.id]) }));
 }

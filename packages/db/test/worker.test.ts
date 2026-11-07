@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DbClient } from '../src/client.js';
 import { rmSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const DB_PATH = resolve('./test/tmp-worker.db');
 
@@ -69,7 +70,6 @@ describe('DbClient worker_thread round-trip', () => {
     await db.createClient({
       id: 'client-1',
       label: 'Test Client',
-      kind: 'cli',
       token_hash: 'hash-123',
     });
     const found = await db.getClientByToken('hash-123');
@@ -121,5 +121,23 @@ describe('DbClient worker_thread round-trip', () => {
     const last = await db.getLastAuditEntry();
     expect(last).toBeDefined();
     expect((last as { action: string }).action).toBe('test.action');
+  });
+
+  it('serializes concurrent audit appends into one verifiable hash chain', async () => {
+    await Promise.all(Array.from({ length: 12 }, (_, index) => db.appendAuditLog({
+      action: `concurrent.${index}`, detail: { index }, prev_hash: 'untrusted-predecessor', entry_hash: 'untrusted-hash',
+    })));
+    const rows = await db.rawQuery('SELECT * FROM audit_log ORDER BY seq') as Array<{
+      action: string; client_id: string | null; target: string | null; detail: string | null;
+      at: string; prev_hash: string; entry_hash: string;
+    }>;
+    let previous = '0';
+    for (const row of rows) {
+      expect(row.prev_hash).toBe(previous);
+      const value = { action: row.action, client_id: row.client_id, target: row.target, detail: row.detail ? JSON.parse(row.detail) : null, at: row.at };
+      expect(row.entry_hash).toBe(createHash('sha256').update(`${previous}|${JSON.stringify(value)}`).digest('hex'));
+      previous = row.entry_hash;
+    }
+    expect(rows.filter((row) => row.action.startsWith('concurrent.'))).toHaveLength(12);
   });
 });

@@ -5,6 +5,8 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
+import { createHmac, randomBytes } from 'node:crypto'
+import { PolicyRegistry } from './policy.js'
 import net from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -15,14 +17,16 @@ process.env['LOG_LEVEL'] = 'error'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const PORT = 13999
-const AUTH = 'Basic ' + Buffer.from('conn-test:secret').toString('base64')
+const PASSWORD = 'a'.repeat(64)
+const CONTROL_SECRET = 'control-secret-'.repeat(4)
+const AUTH = 'Basic ' + Buffer.from('conn-test:' + PASSWORD).toString('base64')
 
 const PW_PORT = 13998
 const children = []
 
 async function startProxy(port, extraEnv = {}) {
   const child = spawn('node', [resolve(__dirname, 'main.js')], {
-    env: { ...process.env, EGRESS_PROXY_PORT: String(port), LOG_LEVEL: 'error', ...extraEnv },
+    env: { ...process.env, EGRESS_PROXY_PORT: String(port), EGRESS_CONTROL_SECRET: CONTROL_SECRET, LOG_LEVEL: 'error', ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   children.push(child)
@@ -32,7 +36,10 @@ async function startProxy(port, extraEnv = {}) {
       const s = net.connect(port, '127.0.0.1', () => { s.end(); res(true) })
       s.on('error', () => res(false))
     })
-    if (ok) return
+    if (ok) {
+      await control(port, '/v1/policies/register', { connection_id: 'conn-test', password: PASSWORD, strict: false, allowed_domains: [] })
+      return
+    }
     await new Promise((r) => setTimeout(r, 100))
   }
   throw new Error('egress-proxy did not start')
@@ -46,6 +53,14 @@ before(async () => {
 after(() => {
   for (const child of children) child.kill('SIGTERM')
 })
+
+async function control(port, path, payload, { headers: supplied, method = 'POST' } = {}) {
+  const body = JSON.stringify(payload)
+  const ts = Date.now().toString(), nonce = randomBytes(16).toString('hex')
+  const headers = supplied ?? { 'x-og-ts': ts, 'x-og-nonce': nonce, 'x-og-sig': createHmac('sha256', CONTROL_SECRET).update(JSON.stringify([method, path, ts, nonce, body])).digest('hex') }
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { 'content-type': 'application/json', ...headers }, body })
+  return response.status
+}
 
 /** Send a plain HTTP proxy request (absolute-form URL). */
 function proxyRequest(url, headers = {}) {
@@ -109,9 +124,9 @@ test('requires Proxy-Authorization', async () => {
   assert.equal(await proxyRequest('http://example.com/'), 407)
 })
 
-test('allows CONNECT to a public host', async () => {
-  const code = await connectRequest('example.com:443')
-  assert.ok(code === 200, `expected 200, got ${code}`)
+test('rejects unregistered connection credentials even with a long password', async () => {
+  const forged = 'Basic ' + Buffer.from('other-connection:' + PASSWORD).toString('base64')
+  assert.equal(await connectRequest('example.com:443', { auth: forged }), 407)
 })
 
 test('rejects CONNECT to 0.0.0.0', async () => {
@@ -158,11 +173,12 @@ test('EGRESS_REQUIRE_PASSWORD: short password gets 407', async () => {
   assert.equal(await connectRequest('example.com:443', { port: PW_PORT, auth: short }), 407)
 })
 
-test('EGRESS_REQUIRE_PASSWORD: long password passes auth', async () => {
-  const long = 'Basic ' + Buffer.from('conn-test:' + 'a'.repeat(32)).toString('base64')
+test('registered long password passes auth and arbitrary long passwords fail', async () => {
+  const long = 'Basic ' + Buffer.from('conn-test:' + PASSWORD).toString('base64')
   // Blocked target gives 403 without network access, proving auth succeeded.
   assert.equal(await connectRequest('127.0.0.1:443', { port: PW_PORT, auth: long }), 403)
-  assert.equal(await connectRequest('example.com:443', { port: PW_PORT, auth: long }), 200)
+  const forged = 'Basic ' + Buffer.from('conn-test:' + 'b'.repeat(64)).toString('base64')
+  assert.equal(await connectRequest('127.0.0.1:443', { port: PW_PORT, auth: forged }), 407)
 })
 
 // ── Special-purpose address table (IANA registries) ───────────────────────
@@ -288,8 +304,10 @@ before(async () => {
   await new Promise((r) => badTarget.server.listen(0, '127.0.0.1', r))
   badTarget.port = badTarget.server.address().port
 
+  const registry = new PolicyRegistry()
+  registry.register({ connection_id: 'conn-test', password: PASSWORD, strict: false, allowed_domains: [] })
   inproc.server = createProxyServer({
-    requirePassword: false,
+    registry, controlSecret: CONTROL_SECRET,
     check: async (hostname) => {
       inproc.checked.push(hostname)
       return hostname === 'target.test'
@@ -407,4 +425,69 @@ test('HTTP forwarding strips hop-by-hop response headers and survives a bad Trai
 test('in-process proxy still blocks hosts the check rejects', async () => {
   const res = await rawProxy([`GET http://other.test/ HTTP/1.1`, 'Host: other.test', 'Connection: close'].join('\r\n'))
   assert.equal(res.status, 403)
+})
+
+// Policy lifecycle and control authentication run against the actual HTTP proxy.
+test('HMAC control plane rejects unsigned and replayed registrations', async () => {
+  const path = '/v1/policies/register'
+  const payload = { connection_id: 'control-fixture', password: PASSWORD, strict: true, allowed_domains: ['example.com'] }
+  assert.equal(await control(PORT, path, payload, { headers: {} }), 401)
+  const body = JSON.stringify(payload), ts = Date.now().toString(), nonce = randomBytes(16).toString('hex')
+  const headers = { 'x-og-ts': ts, 'x-og-nonce': nonce, 'x-og-sig': createHmac('sha256', CONTROL_SECRET).update(JSON.stringify(['POST', path, ts, nonce, body])).digest('hex') }
+  assert.equal(await control(PORT, path, payload, { headers }), 200)
+  assert.equal(await control(PORT, path, payload, { headers }), 401)
+  assert.equal(await control(PORT, '/v1/policies/revoke', payload, { headers }), 401)
+})
+
+test('strict domains include only the domain and its children', async () => {
+  const registry = new PolicyRegistry()
+  registry.register({ connection_id: 'strict-fixture', password: PASSWORD, strict: true, allowed_domains: ['Example.COM'] })
+  const identity = registry.authenticate('strict-fixture', PASSWORD)
+  assert.ok(identity)
+  for (const host of ['example.com', 'api.example.com', 'EXAMPLE.COM.']) assert.equal(registry.allows(identity, host), true)
+  for (const host of ['evil-example.com', 'example.com.evil.com', '127.0.0.1', 'other.com']) assert.equal(registry.allows(identity, host), false)
+  registry.close()
+})
+
+test('strict policy rejects a public domain before DNS and revocation removes HTTP access', async () => {
+  const payload = { connection_id: 'strict-fixture', password: PASSWORD, strict: true, allowed_domains: ['allowed.test'] }
+  assert.equal(await control(inproc.port, '/v1/policies/register', payload), 200)
+  const auth = 'Basic ' + Buffer.from('strict-fixture:' + PASSWORD).toString('base64')
+  const checked = inproc.checked.length
+  const denied = await rawProxy([`GET ${targetUrl('/strict')} HTTP/1.1`, 'Host: target.test', `Proxy-Authorization: ${auth}`, 'Connection: close'].join('\r\n'))
+  assert.equal(denied.status, 403)
+  assert.equal(inproc.checked.length, checked)
+  assert.equal(await control(inproc.port, '/v1/policies/revoke', { connection_id: 'strict-fixture' }), 200)
+  const revoked = await rawProxy([`GET ${targetUrl('/revoked')} HTTP/1.1`, 'Host: target.test', `Proxy-Authorization: ${auth}`, 'Connection: close'].join('\r\n'))
+  assert.equal(revoked.status, 407)
+})
+
+test('leases expire and revoke active tunnels immediately', async () => {
+  let clock = Date.now()
+  const registry = new PolicyRegistry({ now: () => clock })
+  registry.register({ connection_id: 'lease', password: PASSWORD, strict: false, allowed_domains: [], ttl_ms: 1000 })
+  const identity = registry.authenticate('lease', PASSWORD)
+  let destroyed = false
+  registry.track(identity, { destroy() { destroyed = true }, once() {} })
+  clock += 1001
+  assert.equal(registry.authenticate('lease', PASSWORD), null)
+  assert.equal(destroyed, true)
+  assert.equal(registry.allows(identity, 'example.com'), false)
+  registry.close()
+})
+
+test('policy changes close live CONNECT tunnels and replacement secrets invalidate prior credentials', async () => {
+  const payload = { connection_id: 'tunnel-fixture', password: PASSWORD, strict: true, allowed_domains: ['target.test'] }
+  assert.equal(await control(inproc.port, '/v1/policies/register', payload), 200)
+  const socket = net.connect(inproc.port, '127.0.0.1')
+  const auth = 'Basic ' + Buffer.from('tunnel-fixture:' + PASSWORD).toString('base64')
+  await new Promise((resolve, reject) => {
+    socket.once('error', reject)
+    socket.once('connect', () => socket.write(`CONNECT target.test:${target.port} HTTP/1.1\r\nHost: target.test\r\nProxy-Authorization: ${auth}\r\n\r\n`))
+    socket.once('data', data => { assert.match(data.toString(), /200 Connection Established/); resolve() })
+  })
+  const closed = new Promise(resolve => socket.once('close', resolve))
+  assert.equal(await control(inproc.port, '/v1/policies/register', { ...payload, password: 'b'.repeat(64) }), 200)
+  await closed
+  assert.equal(await connectRequest(`target.test:${target.port}`, { port: inproc.port, auth }), 407)
 })

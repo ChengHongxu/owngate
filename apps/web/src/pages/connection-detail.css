@@ -1,0 +1,247 @@
+.connection-detail .connection-inline-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.connection-verify {
+  min-inline-size: calc(4em + 52px);
+}
+
+.connection-detail .connection-inline-title > .card-title,
+.connection-detail .connection-settings > .card-row > .card-title {
+  margin: 0;
+}
+
+.connection-settings {
+  gap: 16px;
+}
+
+.connection-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  align-items: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.connection-overview-grid > * {
+  min-width: 0;
+}
+
+.connection-access-summary {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.connection-setting-section + .connection-setting-section {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.connection-setting-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.connection-setting-content {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.connection-setting-row > button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 3px 0;
+}
+
+.connection-summary-values {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.connection-summary-values > .connection-tag {
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--surface-alt);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.connection-config-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  min-width: 0;
+  margin: 0;
+}
+
+.connection-config-summary > div {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.connection-config-summary dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.connection-config-summary dd {
+  max-width: 40ch;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.connection-dialog-form {
+  max-width: none;
+}
+
+.connection-cookie-import {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.connection-cookie-import > button {
+  padding-inline: 0;
+}
+
+.connection-capabilities {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  align-items: stretch;
+}
+
+.capability-card {
+  grid-template-rows: 48px 38px;
+  gap: 16px;
+  min-width: 0;
+  padding: 20px;
+}
+
+.capability-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.capability-card .capability-card-title {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  flex: 1 1 auto;
+  align-items: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.capability-card-title > .card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.capability-card-title > .help-tip-button {
+  margin-top: 3px;
+}
+
+.capability-card-heading > .status {
+  flex: 0 0 auto;
+}
+
+.capability-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.capability-query-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capability-open {
+  flex: 0 0 auto;
+  min-width: 108px;
+}
+
+.capability-workspace {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.capability-workspace > * {
+  min-width: 0;
+}
+
+.connection-verification > p {
+  flex-basis: auto;
+}
+
+.capability-workspace .form {
+  max-width: none;
+  gap: 12px;
+}
+
+.capability-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  align-items: start;
+  gap: 12px 16px;
+  max-width: 760px;
+}
+
+.capability-fields > label:has(textarea),
+.capability-fields > .schema-field:has(textarea) {
+  grid-column: 1 / -1;
+}
+
+.capability-result {
+  min-width: 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.capability-status-reason {
+  max-width: 78ch;
+}
+
+@media (max-width: 480px) {
+  .connection-detail .section-head > .card-actions {
+    gap: 8px;
+  }
+
+  .connection-config-summary {
+    display: grid;
+    gap: 10px;
+  }
+
+  .capability-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

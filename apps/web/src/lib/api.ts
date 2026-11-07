@@ -12,8 +12,10 @@ import type {
   PublicKeyCredentialRequestOptionsJSON,
 } from '@simplewebauthn/browser'
 import { ApiError, createRequester, createStepUpGate } from './http'
+import type { StepUpReason } from './http'
 import type { CookieItem } from './cookies'
 import type { ScreenStatus } from './screen'
+import type { ConnectionHealth, SupportState } from '@owngate/core'
 
 export { ApiError } from './http'
 
@@ -22,9 +24,28 @@ export interface Connection {
   connector_id: string
   label: string
   config: Record<string, unknown>
-  capability_states: Record<string, { status: string; reason?: string }>
+  capability_states: Record<string, SupportState>
+  health: ConnectionHealth
   created_at: string
   updated_at: string
+  paused?: boolean
+  scope?: 'personal' | 'organization'
+  tags?: string[]
+}
+
+export interface PresentationField {
+  path: string
+  label?: string
+  format?: 'text' | 'number' | 'datetime' | 'link' | 'badge'
+  prominent?: boolean
+}
+
+export interface ResultPresentation {
+  type: 'auto' | 'stats' | 'table' | 'list' | 'feed' | 'json'
+  items?: string
+  fields?: PresentationField[]
+  columns?: PresentationField[]
+  max_rows?: number
 }
 
 export interface Capability {
@@ -35,19 +56,71 @@ export interface Capability {
   effect: string
   cache: { ttl: number } | null
   transport: 'http' | 'browser'
-  support: { status: string }
+  support: SupportState
+  input: Record<string, unknown>
+  output: Record<string, unknown>
+  presentation?: ResultPresentation
+}
+
+export interface Connector {
+  id: string
+  title: string
+  transport: string
+  has_auth: boolean
+  has_login?: boolean
+  views?: import('@owngate/core').ComparisonView[]
+  config?: Record<string, unknown>
+  auth?: { type: string; fields?: Record<string, unknown> }
+}
+
+export interface VerificationResult {
+  verified: boolean
+  capability_states: Connection['capability_states']
+  results: Record<string, Envelope>
+}
+
+export interface Client {
+  id: string
+  label: string
+  revoked: boolean
+  created_at: string
+  expires_at?: string | null
+}
+
+export interface Grant {
+  client_id: string
+  connection_id: string
+  capabilities: string[]
+  visibility?: { pii?: boolean; financial?: boolean; content?: boolean }
 }
 
 export interface Envelope {
   outcome: 'success' | 'error' | 'partial'
   data: unknown
-  error: { code: string; message: string } | null
+  error: { code: string; message: string; retryable?: boolean; details?: Record<string, unknown> } | null
   fields: Record<string, unknown>
   source: { connection_id: string; connection_label: string; capability_id: string }
   data_time: string
   queried_at: string
   cache: { hit: boolean } | null
   warnings: string[]
+  execution?: ExecutionTrace
+}
+
+export interface ExecutionStep {
+  id: string
+  label: string
+  status: 'success' | 'partial' | 'error' | 'skipped'
+  duration_ms: number
+  detail?: string
+  code?: string
+}
+
+export interface ExecutionTrace {
+  id: string
+  started_at: string
+  duration_ms: number
+  steps: ExecutionStep[]
 }
 
 export interface AuthStatus {
@@ -61,6 +134,18 @@ export interface AuthStatus {
 export interface Passkey {
   id: string
   createdAt: string
+}
+
+export interface Account {
+  id: string
+  username: string
+  createdAt: string
+}
+
+export interface AccountChange {
+  ok: true
+  changed: boolean
+  requiresLogin: boolean
 }
 
 export interface ScreenStatusBody {
@@ -86,7 +171,7 @@ const stepUpGate = createStepUpGate()
 const sessionLostListeners = new Set<(err: ApiError) => void>()
 
 /** 由 StepUpDialog 挂载时注册：返回 true 表示验证通过 */
-export function setStepUpPrompt(prompt: (() => Promise<boolean>) | null): void {
+export function setStepUpPrompt(prompt: ((reason?: StepUpReason) => Promise<boolean>) | null): void {
   stepUpGate.setPrompt(prompt)
 }
 
@@ -100,27 +185,38 @@ export function onSessionLost(listener: (err: ApiError) => void): () => void {
 
 const call = createRequester({
   fetch: (input, init) => fetch(input, init),
-  stepUp: () => stepUpGate.request(),
+  stepUp: (reason) => stepUpGate.request(reason),
   onSessionLost: (err) => {
     for (const l of sessionLostListeners) l(err)
   },
 })
 
+export const request = call
+
 const enc = encodeURIComponent
 
 export const api = {
+  listClients: () => call<{ clients: Client[] }>('/admin/clients'),
+  listGrants: () => call<{ grants: Grant[] }>('/admin/grants'),
+  createClient: (input: { label: string; expires_at?: string | null }) =>
+    call<Client & { token: string }>('/admin/clients', { method: 'POST', body: input }),
+  revokeClient: (id: string) =>
+    call<{ ok: boolean }>(`/admin/clients/${enc(id)}/revoke`, { method: 'POST' }),
+  setGrant: (input: Grant) => call<Grant>('/admin/grants', { method: 'POST', body: input }),
   // ── connections ──
   listConnections: () => call<{ connections: Connection[] }>('/admin/connections'),
-  createConnection: (input: { connector_id: string; label: string; config: Record<string, unknown> }) =>
+  createConnection: (input: { connector_id: string; label: string; config: Record<string, unknown>; scope?: 'personal' | 'organization'; confirm_organization?: boolean; tags?: string[] }) =>
     call<Connection>('/admin/connections', { method: 'POST', body: input }),
   deleteConnection: (id: string) =>
     call<{ ok: boolean }>(`/admin/connections/${enc(id)}`, { method: 'DELETE' }),
+  updateConnection: (id: string, input: { config: Record<string, unknown>; label?: string }) =>
+    call<Connection>(`/admin/connections/${enc(id)}`, { method: 'PATCH', body: input }),
+  verifyConnection: (id: string, selection?: { capability_id: string; input: unknown }) =>
+    call<VerificationResult>(`/admin/connections/${enc(id)}/verify`, { method: 'POST', ...(selection ? { body: selection } : {}) }),
 
   // ── connectors ──
   listConnectors: () =>
-    call<{ connectors: Array<{ id: string; title: string; transport: string; has_auth: boolean }> }>(
-      '/admin/connectors',
-    ),
+    call<{ connectors: Connector[] }>('/admin/connectors'),
 
   // ── credentials ──
   getCredentials: (connectionId: string) =>
@@ -128,14 +224,14 @@ export const api = {
       `/admin/connections/${enc(connectionId)}/credentials`,
     ),
   setCredentials: (connectionId: string, credentials: Record<string, string>) =>
-    call<{ ok: boolean }>(`/admin/connections/${enc(connectionId)}/credentials`, {
+    call<VerificationResult & { ok: boolean }>(`/admin/connections/${enc(connectionId)}/credentials`, {
       method: 'PUT',
       body: { credentials },
     }),
 
   // ── capabilities ──
-  listCapabilities: (connectorId: string) =>
-    call<{ capabilities: Capability[] }>(`/admin/capabilities?connector_id=${enc(connectorId)}`),
+  listCapabilities: (connectorId: string, connectionId?: string) =>
+    call<{ capabilities: Capability[] }>(`/admin/capabilities?connector_id=${enc(connectorId)}${connectionId ? `&connection_id=${enc(connectionId)}` : ''}`),
 
   // ── invoke ──
   invoke: (input: { connection_id: string; capability_id: string; input?: unknown; no_cache?: boolean }) =>
@@ -169,6 +265,11 @@ export const api = {
 
 export const authApi = {
   status: () => call<AuthStatus>('/auth/status', { stepUp: false, sessionLost: false }),
+  account: () => call<Account>('/auth/account'),
+  updateAccount: (input: { username: string; current_password: string }) =>
+    call<AccountChange>('/auth/account', { method: 'PATCH', body: input }),
+  changePassword: (input: { current_password: string; new_password: string }) =>
+    call<AccountChange>('/auth/account/password', { method: 'POST', body: input }),
   bootstrap: (username: string, password: string) =>
     call<{ id: string; expiresAt: string }>('/auth/bootstrap', {
       method: 'POST',
@@ -183,6 +284,13 @@ export const authApi = {
       stepUp: false,
       sessionLost: false,
     }),
+  async loginPasskey(username: string, password: string): Promise<void> {
+    const flow = await call<{ ticket: string; options: PublicKeyCredentialRequestOptionsJSON }>('/auth/login/passkey/begin', {
+      method: 'POST', body: { username, password }, stepUp: false, sessionLost: false,
+    })
+    const response = await startAuthentication({ optionsJSON: flow.options })
+    await call('/auth/login/passkey/finish', { method: 'POST', body: { ticket: flow.ticket, response }, stepUp: false, sessionLost: false })
+  },
   logout: () =>
     call<{ ok: boolean }>('/auth/logout', { method: 'POST', stepUp: false, sessionLost: false }),
 
@@ -199,8 +307,10 @@ export const authApi = {
       stepUp: false,
     })
   },
-  stepUpTotp: (code: string) =>
-    call<{ ok: boolean }>('/auth/step-up/totp', { method: 'POST', body: { code }, stepUp: false }),
+  stepUpTotp: (code: string, password: string) =>
+    call<{ ok: boolean }>('/auth/step-up/totp', { method: 'POST', body: { code, password }, stepUp: false }),
+  proveSetupPassword: (password: string) =>
+    call<{ ok: boolean }>('/auth/mfa/setup', { method: 'POST', body: { password }, stepUp: false }),
 
   // ── passkeys ──
   listPasskeys: () => call<{ passkeys: Passkey[] }>('/auth/passkeys'),
@@ -224,8 +334,8 @@ export const authApi = {
     }),
   confirmTotp: (code: string) =>
     call<{ ok: boolean; totpEnabled: boolean }>('/auth/totp/confirm', { method: 'POST', body: { code } }),
-  disableTotp: (code: string) =>
-    call<{ ok: boolean; totpEnabled: boolean }>('/auth/totp/disable', { method: 'POST', body: { code } }),
+  disableTotp: () =>
+    call<{ ok: boolean; totpEnabled: boolean }>('/auth/totp/disable', { method: 'POST' }),
 }
 
 /** Open the screencast websocket for a connection and return the socket. */

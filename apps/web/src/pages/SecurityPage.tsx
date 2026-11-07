@@ -1,29 +1,31 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { QRCodeSVG } from 'qrcode.react'
 import { authApi, type AuthStatus } from '../lib/api'
 import { ApiError, describeAuthError } from '../lib/http'
 import { currentWebAuthnEnv, describeWebAuthnError, passkeySupport } from '../lib/webauthn'
+import { HelpTip } from '../components/HelpTip'
+import './spatial-secondary.css'
 
 /** 安全设置：Passkey 列表与注册、TOTP 启用 / 停用 / 重新绑定（设计方案 §8.2） */
-export function SecurityPage({ status }: { status: AuthStatus }) {
+export function SecurityPage({ status, embedded = false }: { status: AuthStatus; embedded?: boolean }) {
   return (
-    <section>
+    <section className={embedded ? 'settings-security' : undefined}>
       <div className="section-head">
         <div>
-          <h1>安全设置</h1>
-          <p className="muted small">
-            远程登录、导入 cookie、签发令牌、修改授权需要二次验证（Passkey 或 TOTP）。
-            {status.stepUp ? ' 当前会话已在 15 分钟内完成二次验证。' : ''}
-          </p>
+          <div className="help-heading">{embedded ? <h2>安全设置</h2> : <h1>安全设置</h1>}<HelpTip label="验证方式">敏感操作需要二次验证。已有 Passkey 时必须使用 Passkey；只有 TOTP 时需要密码和验证码。远程登录、导入 Cookie、签发令牌、修改授权和认证设置均受此保护。</HelpTip></div>
+          {status.stepUp && <p className="muted small">当前会话已验证。</p>}
         </div>
       </div>
-      <PasskeySection />
-      <TotpSection enabled={status.totpEnabled} />
+      <div className="secondary-security-grid">
+        <section className="secondary-security-section" aria-label="Passkey 管理"><PasskeySection embedded={embedded} /></section>
+        <section className="secondary-security-section" aria-label="TOTP 管理"><TotpSection enabled={status.totpEnabled} embedded={embedded} /></section>
+      </div>
     </section>
   )
 }
 
-function PasskeySection() {
+function PasskeySection({ embedded }: { embedded: boolean }) {
   const qc = useQueryClient()
   const support = passkeySupport(currentWebAuthnEnv())
 
@@ -45,7 +47,7 @@ function PasskeySection() {
 
   return (
     <>
-      <h2>Passkey</h2>
+      {embedded ? <h3>Passkey</h3> : <h2>Passkey</h2>}
       {!support.available ? (
         <div className="card">
           <p className="muted">{support.message}</p>
@@ -94,11 +96,10 @@ function PasskeySection() {
   )
 }
 
-function TotpSection({ enabled }: { enabled: boolean }) {
+function TotpSection({ enabled, embedded }: { enabled: boolean; embedded: boolean }) {
   const qc = useQueryClient()
   const [enrollment, setEnrollment] = useState<{ secretBase32: string; otpauthUrl: string } | null>(null)
   const [confirmCode, setConfirmCode] = useState('')
-  const [disableCode, setDisableCode] = useState('')
 
   const refreshStatus = () => void qc.invalidateQueries({ queryKey: ['auth-status'] })
 
@@ -106,6 +107,7 @@ function TotpSection({ enabled }: { enabled: boolean }) {
   const enroll = useMutation({
     mutationFn: authApi.enrollTotp,
     onSuccess: (r) => {
+      confirm.reset()
       setConfirmCode('')
       setEnrollment({ secretBase32: r.secretBase32, otpauthUrl: r.otpauthUrl })
     },
@@ -121,16 +123,15 @@ function TotpSection({ enabled }: { enabled: boolean }) {
   })
 
   const disable = useMutation({
-    mutationFn: () => authApi.disableTotp(disableCode.trim()),
+    mutationFn: () => authApi.disableTotp(),
     onSuccess: () => {
-      setDisableCode('')
       refreshStatus()
     },
   })
 
   return (
     <>
-      <h2>TOTP 验证码</h2>
+      {embedded ? <h3>TOTP 验证码</h3> : <h2>TOTP 验证码</h2>}
       <div className="card">
         <div className="card-row">
           <div>
@@ -138,56 +139,66 @@ function TotpSection({ enabled }: { enabled: boolean }) {
             <p className="muted small">
               {enabled
                 ? '登录与二次验证时需要填写验证器 App 里的 6 位数字。'
-                : '用 Google Authenticator、1Password 等验证器 App 绑定。不依赖 HTTPS，http://IP 下也可用。'}
+                : '使用 Google Authenticator、1Password 等验证器 App 绑定。'}
             </p>
           </div>
         </div>
 
         {enrollment ? (
-          <div className="form tight">
-            <p className="muted small">在验证器 App 里选择「输入设置密钥」，填入下面的密钥；或把 otpauth 链接粘贴到支持的 App。</p>
-            <label>
-              密钥
-              <code className="secret">{enrollment.secretBase32}</code>
-            </label>
-            <label>
-              otpauth 链接
-              <code className="secret">{enrollment.otpauthUrl}</code>
-            </label>
-            {enabled && (
-              <p className="error-text">密钥已更换：旧验证器上的验证码从现在起不再有效，请立即完成绑定。</p>
-            )}
-            <form
-              className="form tight"
-              onSubmit={(e) => {
-                e.preventDefault()
-                confirm.mutate()
-              }}
-            >
-              <label>
-                App 显示的验证码
-                <input
-                  value={confirmCode}
-                  onChange={(e) => setConfirmCode(e.target.value)}
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  pattern="[0-9]{6,8}"
-                  placeholder="6 位数字"
-                  required
+          <div className="totp-enrollment">
+            <div className="totp-enrollment-layout">
+              <div className="totp-qr">
+                <QRCodeSVG
+                  className="totp-qr-code"
+                  role="img"
+                  aria-label="TOTP 绑定二维码"
+                  value={enrollment.otpauthUrl}
+                  size={208}
+                  level="M"
+                  marginSize={4}
+                  bgColor="#FFFFFF"
+                  fgColor="#000000"
                 />
-              </label>
-              {confirm.isError && <p className="error-text">{describeAuthError(confirm.error)}</p>}
-              <div className="card-actions">
-                <button className="primary" type="submit" disabled={confirm.isPending}>
-                  {confirm.isPending ? '确认中…' : '确认启用'}
-                </button>
-                {!enabled && (
-                  <button type="button" onClick={() => setEnrollment(null)}>
-                    稍后再说
-                  </button>
-                )}
               </div>
-            </form>
+              <form
+                className="form tight totp-confirm-form"
+                onSubmit={(e) => {
+                  e.preventDefault()
+                  confirm.mutate()
+                }}
+              >
+                <p className="muted small">用验证器 App 扫码，再输入验证码。</p>
+                <label>
+                  App 显示的验证码
+                  <input
+                    value={confirmCode}
+                    onChange={(e) => setConfirmCode(e.target.value)}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    pattern="[0-9]{6,8}"
+                    placeholder="6 位数字"
+                    required
+                  />
+                </label>
+                {confirm.isError && <p className="error-text">{describeAuthError(confirm.error)}</p>}
+                <div className="card-actions">
+                  <button className="primary" type="submit" disabled={confirm.isPending}>
+                    {confirm.isPending ? '确认中…' : '确认启用'}
+                  </button>
+                  <button type="button" disabled={confirm.isPending} onClick={() => { setEnrollment(null); setConfirmCode(''); confirm.reset() }}>取消绑定</button>
+                </div>
+              </form>
+            </div>
+            <details className="totp-manual field-help">
+              <summary>无法扫码？手动添加</summary>
+              <div className="form tight">
+                <label>密钥<code className="secret">{enrollment.secretBase32}</code></label>
+                <label>otpauth 链接<code className="secret">{enrollment.otpauthUrl}</code></label>
+              </div>
+            </details>
+            {enabled && (
+              <p className="muted small">确认新验证码后才会更换密钥；此前旧验证器仍然有效。此绑定流程 10 分钟后过期。</p>
+            )}
           </div>
         ) : enabled ? (
           <form
@@ -197,18 +208,7 @@ function TotpSection({ enabled }: { enabled: boolean }) {
               disable.mutate()
             }}
           >
-            <label>
-              停用需要当前验证码
-              <input
-                value={disableCode}
-                onChange={(e) => setDisableCode(e.target.value)}
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                pattern="[0-9]{6,8}"
-                placeholder="6 位数字"
-                required
-              />
-            </label>
+            <p className="muted small">停用或重新绑定前需验证当前身份。丢失验证码时可使用已注册的 Passkey。</p>
             {disable.isError && <p className="error-text">{describeAuthError(disable.error)}</p>}
             {enroll.isError && <p className="error-text">{describeAuthError(enroll.error)}</p>}
             <div className="card-actions">

@@ -1,8 +1,18 @@
--- Initial schema migration for webridge
+-- Initial schema migration for owngate
 -- Executed by the DB worker on startup via db.exec() (better-sqlite3)
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+
+-- A single server or offline maintenance owner. Bound worker calls are fenced
+-- against this row, so an old process cannot write after its lease expires.
+CREATE TABLE IF NOT EXISTS og_service_lease (
+  slot TEXT PRIMARY KEY CHECK (slot = 'primary'),
+  owner TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('server', 'maintenance')),
+  expires_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS connectors (
   id TEXT PRIMARY KEY,
@@ -36,7 +46,6 @@ CREATE TABLE IF NOT EXISTS credentials (
 CREATE TABLE IF NOT EXISTS clients (
   id TEXT PRIMARY KEY,
   label TEXT NOT NULL,
-  kind TEXT NOT NULL,
   token_hash TEXT NOT NULL,
   revoked INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -168,3 +177,27 @@ CREATE TABLE IF NOT EXISTS channel_upstream_links (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (connection_id, channel_id)
 );
+
+CREATE TABLE IF NOT EXISTS comparison_links (
+  connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  view_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  target_connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (connection_id, view_id, item_id)
+);
+
+CREATE TABLE IF NOT EXISTS og_schema_migrations (
+  id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Copy legacy associations once. Keeping a marker prevents a deliberately
+-- deleted generic association from reappearing when the server restarts.
+BEGIN IMMEDIATE;
+INSERT OR IGNORE INTO comparison_links(connection_id,view_id,item_id,target_connection_id,created_at)
+SELECT connection_id,'channel-upstreams',channel_id,upstream_connection_id,created_at
+FROM channel_upstream_links
+WHERE NOT EXISTS (SELECT 1 FROM og_schema_migrations WHERE id='comparison_links_v1');
+INSERT OR IGNORE INTO og_schema_migrations(id) VALUES('comparison_links_v1');
+COMMIT;

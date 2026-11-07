@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# webridge-browser worker
+# owngate-browser worker
 # 基于官方 Playwright 镜像（已含浏览器与依赖），仅添加 Xvfb 启动包装。
 # 注意：不使用 xvfb-run —— 在 Docker/WSL2 下会死锁，改为手动启动 Xvfb。
 
@@ -20,11 +20,14 @@ ENV PATH=$PNPM_HOME:$PATH
 # 只复制部分包会让 --frozen-lockfile 与后续 build 的依赖状态检查失败。
 COPY . .
 RUN npm install -g pnpm@11.15.1 \
- && pnpm install --frozen-lockfile --filter @webridge/browser... \
- && pnpm --filter @webridge/core --filter @webridge/browser-runtime build \
- && pnpm --filter @webridge/browser build
+ && pnpm install --frozen-lockfile --filter @owngate/browser... \
+ && pnpm --filter @owngate/core --filter @owngate/browser-runtime build \
+ && pnpm --filter @owngate/browser build
 
-ENV NODE_ENV=production
+# 根文件系统在 Compose 中只读，Chromium 的 crashpad/config/cache 必须走 tmpfs。
+ENV NODE_ENV=production \
+    XDG_CONFIG_HOME=/tmp/owngate-config \
+    XDG_CACHE_HOME=/tmp/owngate-cache
 EXPOSE 4000
 
 # 手动启动 Xvfb 并轮询就绪（xvfb-run 在 Docker/WSL2 下会死锁，见 deploy/browser-entrypoint.sh）

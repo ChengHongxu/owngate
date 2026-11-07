@@ -1,0 +1,125 @@
+.connections-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  align-items: stretch;
+}
+
+.connections-grid > .card {
+  grid-template-rows: auto 1fr auto;
+  align-content: start;
+}
+
+.connections-grid > .card > .card-actions {
+  align-self: end;
+  grid-row: 3;
+}
+
+.connection-create-form {
+  max-width: none;
+}
+
+.overview-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  align-items: start;
+  gap: 18px;
+  min-width: 0;
+}
+
+.activity-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  list-style: none;
+  overflow: hidden;
+}
+
+.activity-list:empty {
+  display: none;
+}
+
+.activity-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  min-width: 0;
+  padding: 16px 20px;
+}
+
+.activity-row + .activity-row {
+  border-top: 1px solid var(--border);
+}
+
+.activity-main {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.activity-main > strong,
+.activity-row > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.activity-row > .status,
+.activity-row > a.button,
+.activity-row > button {
+  flex-shrink: 0;
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 20px;
+  align-items: start;
+}
+
+.audit-row > details {
+  max-width: none;
+  min-width: 0;
+  justify-self: end;
+  margin: 0;
+}
+
+.audit-row > details[open] {
+  grid-column: 1 / -1;
+  justify-self: stretch;
+}
+
+.audit-row details[open] > .envelope {
+  margin-top: 12px;
+}
+
+.proposal-review {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.proposal-review > .envelope {
+  margin: 0;
+}
+
+@media (max-width: 480px) {
+  .activity-row {
+    gap: 10px 12px;
+    padding: 16px;
+  }
+
+  .audit-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .audit-row > details {
+    justify-self: start;
+  }
+
+  .activity-main {
+    flex-basis: 100%;
+  }
+}

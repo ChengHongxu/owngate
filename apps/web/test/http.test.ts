@@ -39,6 +39,15 @@ describe('withStepUp', () => {
     await expect(withStepUp(run, stepUp)).resolves.toBe('ok')
     expect(run).toHaveBeenCalledTimes(2)
     expect(stepUp).toHaveBeenCalledTimes(1)
+    expect(stepUp).toHaveBeenCalledWith('step_up')
+  })
+
+  it('requests the dedicated initial-setup proof without treating it as normal MFA step-up', async () => {
+    const run = vi.fn().mockRejectedValueOnce(new ApiError(403, 'MFA_SETUP_REQUIRED', 'Password required')).mockResolvedValueOnce('enrolled')
+    const prompt = vi.fn(async () => true)
+    await expect(withStepUp(run, prompt)).resolves.toBe('enrolled')
+    expect(prompt).toHaveBeenCalledWith('setup')
+    expect(run).toHaveBeenCalledTimes(2)
   })
 
   it('does not loop when the retry still demands step-up', async () => {
@@ -132,6 +141,8 @@ describe('error classification', () => {
     expect(b).toMatchObject({ code: 'STEP_UP_REQUIRED', message: '需要二次验证', nextStep: '去验证' })
     const c = toApiError(502, 'Bad Gateway', 'upstream down', 'upstream down')
     expect(c).toMatchObject({ status: 502, code: undefined, message: 'upstream down' })
+    const d = toApiError(503, 'Unavailable', { error: { code: 'UPSTREAM_UNAVAILABLE', message: '服务暂不可用', next_step: '稍后重试' } }, '')
+    expect(d).toMatchObject({ status: 503, code: 'UPSTREAM_UNAVAILABLE', message: '服务暂不可用', nextStep: '稍后重试' })
   })
 
   it('describes known auth codes in Chinese and falls back to the message', () => {

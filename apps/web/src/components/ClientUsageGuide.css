@@ -1,0 +1,16 @@
+.client-usage-guide { display: grid; gap: 12px; min-width: 0; max-width: 100%; }
+.client-usage-guide h3 { margin: 0; }
+.client-usage-tabs { display: flex; gap: 20px; min-width: 0; border-bottom: 1px solid var(--border); }
+.client-usage-tabs > button { min-height: 40px; margin-bottom: -1px; padding: 8px 2px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); }
+.client-usage-tabs > button[aria-selected='true'] { border-bottom-color: var(--link); color: var(--text); }
+.client-usage-tabs > button:hover { color: var(--text); background: transparent; }
+.client-usage-panel { display: grid; gap: 12px; min-width: 0; }
+.client-usage-panel[hidden] { display: none; }
+.client-usage-snippet { display: grid; gap: 6px; min-width: 0; }
+.client-usage-snippet-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.client-usage-snippet-label button { min-height: 28px; padding: 0 4px; font-size: 12px; }
+.client-usage-code { min-width: 0; max-width: 100%; margin: 0; padding: 11px 13px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.client-usage-extra { min-width: 0; }
+.client-usage-extra[open] { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.client-usage-extra[open] > summary { margin-bottom: 0; }
+.client-usage-extra code { overflow-wrap: anywhere; }

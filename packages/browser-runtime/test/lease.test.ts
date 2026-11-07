@@ -201,13 +201,42 @@ describe('XvfbManager.start', () => {
     expect(x.spawns).toBe(1)
     expect(a).toEqual(b)
     expect(x.listActive()).toHaveLength(1)
+    await x.stop('c1')
   })
 
   it('stop() during a start leaves no active display behind', async () => {
+    const exits = process.listenerCount('exit')
     const x = new CountingXvfb()
     const starting = x.start('c1')
     await x.stop('c1')
     await starting
     expect(x.listActive()).toHaveLength(0)
+    expect(process.listenerCount('exit')).toBe(exits)
+  })
+
+  it('attaches one exit cleanup only while it owns displays, removing it after the final stop', async () => {
+    const exits = process.listenerCount('exit')
+    const idle = Array.from({ length: 20 }, () => new CountingXvfb())
+    expect(process.listenerCount('exit')).toBe(exits)
+    const x = idle[0]!
+    await Promise.all([x.start('c1'), x.start('c2')])
+    expect(process.listenerCount('exit')).toBe(exits + 1)
+    await x.stop('c1')
+    expect(process.listenerCount('exit')).toBe(exits + 1)
+    await x.stop('c2')
+    expect(process.listenerCount('exit')).toBe(exits)
+    await x.start('c3')
+    expect(process.listenerCount('exit')).toBe(exits + 1)
+    await x.stop('c3')
+    expect(process.listenerCount('exit')).toBe(exits)
+  })
+
+  it('removes its exit cleanup after a failed launch', async () => {
+    const exits = process.listenerCount('exit')
+    class FailingXvfb extends XvfbManager {
+      protected override async spawnDisplay(): Promise<never> { throw new Error('fixture launch failed') }
+    }
+    await expect(new FailingXvfb().start('c1')).rejects.toThrow('fixture launch failed')
+    expect(process.listenerCount('exit')).toBe(exits)
   })
 })

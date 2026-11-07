@@ -10,14 +10,14 @@
 import type { FastifyReply, FastifyRequest, onRequestAsyncHookHandler } from 'fastify';
 import type { AuthService } from './service.js';
 
-export const SESSION_COOKIE = 'wr_session';
+export const SESSION_COOKIE = 'og_session';
 
 export interface AdminSession {
   sessionId: string;
   userId: string;
 }
 
-/** Cookie flags for wr_session. `secure` only when the deployment is served over https. */
+/** Cookie flags for og_session. `secure` only when the deployment is served over https. */
 export function sessionCookieOptions(origin: string): {
   httpOnly: boolean;
   sameSite: 'strict';
@@ -45,8 +45,8 @@ export async function requireAdminSession(
   reply: FastifyReply,
   auth: AuthService,
 ): Promise<AdminSession | null> {
-  // Development mode: bypass auth if DEV_SKIP_AUTH=1
-  if (process.env['DEV_SKIP_AUTH'] === '1') {
+  // An accidentally inherited development flag cannot disable production auth.
+  if (process.env['NODE_ENV'] === 'development' && process.env['DEV_SKIP_AUTH'] === '1') {
     return { sessionId: 'dev', userId: 'dev-user' };
   }
 

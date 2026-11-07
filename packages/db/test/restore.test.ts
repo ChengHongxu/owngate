@@ -30,8 +30,8 @@ describe('DbClient state listing for startup restore', () => {
       config: {},
       capability_states: { 'x.y': { status: 'needs_auth', reason: 'expired' } },
     });
-    await db.createClient({ id: 'cl-1', label: 'one', kind: 'cli', token_hash: 'h1' });
-    await db.createClient({ id: 'cl-2', label: 'two', kind: 'mcp', token_hash: 'h2' });
+    await db.createClient({ id: 'cl-1', label: 'one', token_hash: 'h1' });
+    await db.createClient({ id: 'cl-2', label: 'two', token_hash: 'h2' });
     await db.revokeClient('cl-2');
   });
 

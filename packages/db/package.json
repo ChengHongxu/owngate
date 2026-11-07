@@ -1,5 +1,5 @@
 {
-  "name": "@webridge/db",
+  "name": "@owngate/db",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
   "dependencies": {
     "better-sqlite3": "^11.10.0",
     "drizzle-orm": "^0.43.0",
-    "@webridge/core": "workspace:*"
+    "@owngate/core": "workspace:*"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",

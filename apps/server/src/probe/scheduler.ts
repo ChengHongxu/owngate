@@ -14,11 +14,11 @@
 // Missed runs are not replayed (§10, 错过执行不补跑): the timer only ever runs
 // the current period, and start() runs one probe immediately.
 //
-// Timer: plain setInterval. croner is not a dependency of @webridge/server yet;
+// Timer: plain setInterval. croner is not a dependency of @owngate/server yet;
 // a fixed interval needs no cron expression, so this avoids a new package.
 
-import type { Connection, SupportState, SupportStatus } from '@webridge/core';
-import type { DbClient } from '@webridge/db';
+import type { Connection, SupportState, SupportStatus } from '@owngate/core';
+import type { DbClient } from '@owngate/db';
 
 export const DEFAULT_PROBE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 // setInterval clamps delays above 2^31-1 ms to 1 ms; refuse them instead.
@@ -40,7 +40,7 @@ export interface ProbeAuditEntry {
 }
 
 export interface ProbeDeps {
-  db: Pick<DbClient, 'updateConnectionStates'>;
+  db: Pick<DbClient, 'rawRun'>;
   connectionMap: Map<string, Connection>;
   /**
    * Runs one capability probe on the browser worker (POST /v1/probe).
@@ -53,6 +53,9 @@ export interface ProbeDeps {
    */
   resolveTarget: (connection: Connection) => ProbeTarget | undefined;
   audit: (entry: ProbeAuditEntry) => void;
+  /** Shares the trusted server execution clock with ordinary invocations. */
+  nextSequence: () => number;
+  onObserved?: (connectionId: string, capabilityId: string, sequence: number, updatedIds: string[]) => void;
   intervalMs?: number;
   /** Injected for tests. */
   now?: () => Date;
@@ -72,7 +75,7 @@ export interface ProbeStatus {
 }
 
 const SUPPORT_STATUSES: ReadonlySet<string> = new Set<SupportStatus>([
-  'supported', 'partial', 'needs_auth', 'needs_plan', 'needs_adapter', 'unsupported', 'disabled',
+  'unverified', 'supported', 'partial', 'needs_auth', 'needs_plan', 'needs_adapter', 'unavailable', 'unsupported', 'disabled',
 ]);
 
 function isTimeout(e: unknown): boolean {
@@ -161,6 +164,10 @@ export class ProbeScheduler {
       return { connectionId, status: 'not_found', reason: 'connection not found' };
     }
 
+    if (connection.paused) return { connectionId, status: 'skipped', reason: 'connection is paused' };
+    const revision = connection.updated_at;
+    const previousStates = connection.capability_states;
+
     let target: ProbeTarget | undefined;
     try {
       target = this.deps.resolveTarget(connection);
@@ -172,12 +179,20 @@ export class ProbeScheduler {
     }
 
     let outcome: { status: string; reason?: string };
+    const sequence = this.deps.nextSequence();
     try {
       outcome = await this.deps.probe(connectionId, target.whoami);
     } catch (e) {
       return isTimeout(e)
         ? this.failure(connectionId, 'timeout', 'probe.timeout', e)
         : this.failure(connectionId, 'error', 'probe.error', e);
+    }
+
+    // An admin may pause while the network probe is running. Never restore
+    // capability state for that connection after the pause took effect.
+    if (connection.paused) return { connectionId, status: 'skipped', reason: 'connection is paused' };
+    if (this.deps.connectionMap.get(connectionId) !== connection || connection.updated_at !== revision || connection.capability_states !== previousStates) {
+      return { connectionId, status: 'skipped', reason: 'connection changed while probing' };
     }
 
     if (!SUPPORT_STATUSES.has(outcome.status)) {
@@ -190,13 +205,9 @@ export class ProbeScheduler {
     const probedAt = this.nowIso();
     const next = this.nextStates(connection.capability_states, target, status, outcome.reason, probedAt);
 
-    // Memory first: invoke() reads connectionMap, so a needs_auth result must
-    // block calls even if the DB write below fails.
-    connection.capability_states = next;
-    connection.updated_at = probedAt;
-
     try {
-      await this.deps.db.updateConnectionStates(connectionId, next, probedAt);
+      const saved = await this.deps.db.rawRun('UPDATE connections SET capability_states=? WHERE id=? AND updated_at=? AND capability_states=?', [JSON.stringify(next), connectionId, revision, JSON.stringify(previousStates)]);
+      if (!saved.changes) return { connectionId, status: 'skipped', reason: 'connection changed while probing' };
     } catch (e) {
       this.deps.audit({
         action: 'probe.persist_failed',
@@ -204,6 +215,14 @@ export class ProbeScheduler {
         detail: { status, error: errorMessage(e) },
       });
     }
+    if (this.deps.connectionMap.get(connectionId) !== connection || connection.updated_at !== revision || connection.capability_states !== previousStates) {
+      return { connectionId, status: 'skipped', reason: 'connection changed while probing' };
+    }
+    // Authentication failures still block in memory when storage fails, but a
+    // health observation never changes the settings revision or query cache.
+    connection.capability_states = next;
+    this.deps.onObserved?.(connectionId, target.whoami, sequence,
+      Object.keys(next).filter(id => next[id] !== previousStates[id]));
 
     if (status === 'needs_auth') {
       this.deps.audit({
@@ -228,20 +247,21 @@ export class ProbeScheduler {
     if (status === 'needs_auth') {
       const ids = new Set([...target.capabilities, target.whoami]);
       for (const id of ids) {
+        if (['disabled', 'unsupported'].includes(current[id]?.status ?? '')) continue;
         next[id] = { status: 'needs_auth', reason: NEEDS_AUTH_REASON, probed_at: probedAt };
       }
       return next;
     }
 
     if (status === 'supported') {
-      // Login is valid again: drop needs_auth overrides so each capability
-      // falls back to its connector default. Other overrides (disabled,
-      // needs_plan, ...) were set for other reasons and stay.
+      // Only whoami was exercised. Other capabilities still need their own
+      // checks; successful login does not prove every adapter works.
       for (const [id, state] of Object.entries(next)) {
-        if (state.status === 'needs_auth') delete next[id];
+        if (state.status === 'needs_auth' || state.status === 'needs_adapter' && !state.probed_at) next[id] = { status: 'unverified' };
       }
     }
 
+    if (['disabled', 'unsupported'].includes(current[target.whoami]?.status ?? '')) return next;
     const whoamiState: SupportState = { status, probed_at: probedAt };
     if (reason !== undefined) whoamiState.reason = reason;
     next[target.whoami] = whoamiState;

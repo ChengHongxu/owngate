@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { BrowserContext, Page } from 'playwright'
-import { detectAuthFailure, signRequest } from '@webridge/browser-runtime'
+import { detectAuthFailure, signRequest } from '@owngate/browser-runtime'
 import { validateImportedCookies, MAX_IMPORTED_COOKIES } from '../src/cookies.js'
 import {
   LoginStateTracker,
@@ -27,6 +27,7 @@ function fakePage(opts: FakePageOpts = {}): Page {
   const visible = new Set(opts.visible ?? [])
   const page = {
     url: () => url,
+    close: async () => undefined,
     goto: async (next: string) => {
       url = next
       return null
@@ -112,6 +113,7 @@ describe('detectAuthFailure', () => {
     let opened = 0
     const ctx = {
       pages: () => [],
+      cookies: async () => [],
       newPage: async () => {
         opened++
         return page
@@ -370,7 +372,7 @@ describe('login HTTP endpoints', () => {
   })
 
   it('GET /v1/login/status rejects a signature made for another connection', async () => {
-    const headers = signRequest('/v1/login/status?connection_id=other', SECRET)
+    const headers = signRequest('', SECRET, { method: 'GET', path: '/v1/login/status?connection_id=other' })
     const resp = await app.inject({
       method: 'GET',
       url: '/v1/login/status?connection_id=c1',
@@ -381,7 +383,7 @@ describe('login HTTP endpoints', () => {
 
   it('GET /v1/login/status returns idle for an unknown connection', async () => {
     const url = '/v1/login/status?connection_id=never-seen'
-    const resp = await app.inject({ method: 'GET', url, headers: signRequest(url, SECRET) })
+    const resp = await app.inject({ method: 'GET', url, headers: signRequest('', SECRET, { method: 'GET', path: url }) })
     expect(resp.statusCode).toBe(200)
     const body = JSON.parse(resp.body)
     expect(body.status).toBe('idle')
@@ -396,7 +398,7 @@ describe('login HTTP endpoints', () => {
     const resp = await app.inject({
       method: 'POST',
       url: '/v1/cookies/import',
-      headers: { 'content-type': 'application/json', ...signRequest(JSON.stringify(body), SECRET) },
+      headers: { 'content-type': 'application/json', ...signRequest(JSON.stringify(body), SECRET, { method: 'POST', path: '/v1/cookies/import' }) },
       payload: body,
     })
     expect(resp.statusCode).toBe(400)

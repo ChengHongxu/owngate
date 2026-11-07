@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
-# webridge-server 多阶段构建
+# owngate-server 多阶段构建
 # runner 阶段保持精简，只含编译产物与生产依赖（含 better-sqlite3 原生模块）
 
-# ─── builder ────────────────────────────────────────────────────────────────
-FROM node:24-slim AS builder
+# ─── dependencies ───────────────────────────────────────────────────────────
+FROM node:24-slim AS dependencies
 
 # 启用 corepack 并准备 pnpm（与 root package.json 的 packageManager 字段一致）
 ENV PNPM_HOME=/usr/local/share/pnpm
@@ -29,18 +29,22 @@ COPY packages/vault/package.json packages/vault/tsconfig.json ./packages/vault/
 COPY packages/schema-meta/package.json packages/schema-meta/tsconfig.json ./packages/schema-meta/
 COPY packages/connector-runtime/package.json packages/connector-runtime/tsconfig.json ./packages/connector-runtime/
 COPY packages/browser-runtime/package.json packages/browser-runtime/tsconfig.json ./packages/browser-runtime/
+COPY packages/runtime-http/package.json packages/runtime-http/tsconfig.json ./packages/runtime-http/
 COPY apps/web/package.json ./apps/web/
 COPY services/egress-proxy/package.json ./services/egress-proxy/
 
 RUN pnpm install --frozen-lockfile
 
+# ─── builder ────────────────────────────────────────────────────────────────
+FROM dependencies AS builder
+
 # 复制全部源码并构建所有包
 COPY . .
 RUN pnpm -r build
 
-# 重新安装生产依赖到独立的 production node_modules
-RUN pnpm install --frozen-lockfile --prod \
- && find node_modules -name "*.ts" -type f -delete 2>/dev/null || true
+# 保留 pnpm 的虚拟存储与各工作区 node_modules 链接，只安装生产依赖。
+# 不能只复制根 node_modules：直接依赖的入口位于各包自己的 node_modules。
+RUN CI=true pnpm install --frozen-lockfile --prod --offline
 
 # ─── runner ────────────────────────────────────────────────────────────────
 FROM node:24-slim AS runner
@@ -48,29 +52,46 @@ FROM node:24-slim AS runner
 # 运行时仅需要 libsqlite3 共享库（better-sqlite3 .node 已在 builder 编译）
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libsqlite3-0 ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /data \
+ && chown 1000:1000 /data
 
 WORKDIR /app
 
 # 复制生产依赖与编译产物
 COPY --from=builder /repo/node_modules ./node_modules
+COPY --from=builder /repo/apps/server/node_modules ./apps/server/node_modules
 COPY --from=builder /repo/apps/server/dist ./apps/server/dist
 COPY --from=builder /repo/apps/server/package.json ./apps/server/package.json
+COPY --from=builder /repo/apps/cli/node_modules ./apps/cli/node_modules
+COPY --from=builder /repo/apps/cli/dist ./apps/cli/dist
+COPY --from=builder /repo/apps/cli/package.json ./apps/cli/package.json
+COPY --from=builder /repo/packages/core/node_modules ./packages/core/node_modules
 COPY --from=builder /repo/packages/core/dist ./packages/core/dist
 COPY --from=builder /repo/packages/core/package.json ./packages/core/package.json
+COPY --from=builder /repo/packages/db/node_modules ./packages/db/node_modules
 COPY --from=builder /repo/packages/db/dist ./packages/db/dist
 COPY --from=builder /repo/packages/db/package.json ./packages/db/package.json
+COPY --from=builder /repo/packages/vault/node_modules ./packages/vault/node_modules
 COPY --from=builder /repo/packages/vault/dist ./packages/vault/dist
 COPY --from=builder /repo/packages/vault/package.json ./packages/vault/package.json
+COPY --from=builder /repo/packages/schema-meta/node_modules ./packages/schema-meta/node_modules
 COPY --from=builder /repo/packages/schema-meta/dist ./packages/schema-meta/dist
 COPY --from=builder /repo/packages/schema-meta/package.json ./packages/schema-meta/package.json
+COPY --from=builder /repo/packages/connector-runtime/node_modules ./packages/connector-runtime/node_modules
 COPY --from=builder /repo/packages/connector-runtime/dist ./packages/connector-runtime/dist
 COPY --from=builder /repo/packages/connector-runtime/package.json ./packages/connector-runtime/package.json
+COPY --from=builder /repo/packages/runtime-http/node_modules ./packages/runtime-http/node_modules
+COPY --from=builder /repo/packages/runtime-http/dist ./packages/runtime-http/dist
+COPY --from=builder /repo/packages/runtime-http/package.json ./packages/runtime-http/package.json
 # 连接器清单（CONNECTORS_DIR）与后台前端产物（WEB_ROOT），路径与 compose 中一致
 COPY --from=builder /repo/connectors ./connectors
 COPY --from=builder /repo/apps/web/dist ./apps/web/dist
 
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    DB_PATH=/data/owngate.db \
+    CONNECTORS_DIR=/app/connectors \
+    WEB_ROOT=/app/apps/web/dist
 
 USER 1000:1000
 EXPOSE 3000

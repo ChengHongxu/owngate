@@ -1,5 +1,5 @@
 {
-  "name": "@webridge/browser-runtime",
+  "name": "@owngate/browser-runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,10 +14,12 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@webridge/core": "workspace:*",
-    "playwright": "^1.52.0"
+    "@owngate/core": "workspace:*",
+    "playwright": "^1.52.0",
+    "pngjs": "^7.0.0"
   },
   "devDependencies": {
+    "@types/pngjs": "^6.0.5",
     "typescript": "^5.8.0",
     "vitest": "^3.2.0"
   }

@@ -14,11 +14,15 @@ export { AsyncMutex } from './mutex.js'
 export {
   signRequest,
   verifyRequest,
+  CLOCK_SKEW_MS,
+  type RpcRequestTarget,
+  type SignedRequestHeaders,
 } from './hmac.js'
 export {
   ScreencastSession,
   type ScreencastOptions,
 } from './screencast.js'
+export { parseScreenInput, type ScreenInput } from './input.js'
 export {
   checkLoginOnce,
   checkCookieConditions,
@@ -40,3 +44,5 @@ export {
   assertConnectionId,
   isValidConnectionId,
 } from './connection-id.js'
+
+export { EgressController, parseEgressPolicy, type EgressPolicy, type EgressControlConfig } from './egress.js'

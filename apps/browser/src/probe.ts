@@ -17,7 +17,7 @@ import {
   checkUrlConditions,
   detectAuthFailure,
   type LoginCondition,
-} from '@webridge/browser-runtime'
+} from '@owngate/browser-runtime'
 import type { SessionManager } from './session.js'
 import type { ExecResult, execCapability } from './exec.js'
 import {
@@ -33,6 +33,7 @@ export interface ProbeRequest {
   loginUrl: string
   successWhen: readonly LoginCondition[]
   whoami?: string
+  connectorId?: string
   deadlineMs: number
 }
 
@@ -40,6 +41,8 @@ export interface ProbeResponse {
   status: 'supported' | 'needs_auth' | 'error'
   reason?: string
   account?: unknown
+  connection_status?: 'paused' | 'needs_auth'
+  error_code?: WorkerErrorCode
 }
 
 export interface ProbeTiming {
@@ -124,7 +127,7 @@ async function probeLocked(
   if (req.whoami === undefined) return { status: 'supported', reason: hit.reason }
 
   signal.throwIfAborted()
-  const result = await exec(context, req.whoami, {}, remaining(deadlineAt), signal)
+  const result = await exec(context, req.whoami, {}, remaining(deadlineAt), signal, req.connectorId)
   return fromWhoami(result)
 }
 
@@ -141,11 +144,13 @@ function fromWhoami(result: ExecResult): ProbeResponse {
       error.code === 'RISK_CONTROL_DETECTED'
         ? `risk control: ${error.what_happened}`
         : `${error.code}: ${error.what_happened}`
-    return { status: 'needs_auth', reason }
+    return { status: 'needs_auth', reason, connection_status: error.code === 'RISK_CONTROL_DETECTED' ? 'paused' : 'needs_auth', error_code: error.code }
   }
   return {
     status: 'error',
     reason: error ? `whoami failed: ${error.code}: ${error.what_happened}` : 'whoami failed',
+    ...(error ? { error_code: error.code } : {}),
+    ...((result.meta as { connection_status?: string } | undefined)?.connection_status === 'paused' ? { connection_status: 'paused' as const } : {}),
   }
 }
 

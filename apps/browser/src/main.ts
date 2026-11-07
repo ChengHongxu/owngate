@@ -11,10 +11,12 @@ import { pathToFileURL } from 'node:url'
 import { resolve } from 'node:path'
 import Fastify, { type FastifyReply } from 'fastify'
 import fastifyWebsocket from '@fastify/websocket'
-import { ScreencastSession, isValidConnectionId } from '@webridge/browser-runtime'
-import type { LoginCondition } from '@webridge/browser-runtime'
+import { ScreencastSession, isValidConnectionId, parseScreenInput, parseEgressPolicy } from '@owngate/browser-runtime'
+import type { LoginCondition } from '@owngate/browser-runtime'
 import { makeHmacPlugin } from './auth.js'
 import { SessionManager } from './session.js'
+import { SocialGuard } from './social/guard.js'
+import { BrowserDiagnostics } from './diagnostics.js'
 import { execCapability, type ExecResult } from './exec.js'
 import { validateImportedCookies } from './cookies.js'
 import { parseLoginConditions } from './login-state.js'
@@ -42,8 +44,18 @@ const MAX_SELECTOR_LENGTH = 512
 const MAX_URL_LENGTH = 2048
 
 interface CheckCacheEntry {
+  fingerprint: string
   result: ExecResult
   expiresAt: number
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']'
+  if (typeof value === 'object' && value !== null) {
+    const object = value as Record<string, unknown>
+    return '{' + Object.keys(object).sort().map((key) => JSON.stringify(key) + ':' + canonical(object[key])).join(',') + '}'
+  }
+  return JSON.stringify(value) ?? 'null'
 }
 
 /** Optional overrides, for tests. Production calls buildBrowserServer() with none. */
@@ -54,6 +66,7 @@ export interface BrowserServerDeps {
   sessionManager?: SessionManager
   /** /v1/probe redirect-settle timing. Default 1 s quiet, 5 s max. */
   probeTiming?: ProbeTiming
+  socialGuard?: SocialGuard
 }
 
 // ── Request parsing ────────────────────────────────────────────────────────
@@ -123,12 +136,24 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     throw new Error('BROWSER_RPC_SECRET or BROWSER_RPC_SECRET_FILE must be set')
   }
   const exec = deps.exec ?? execCapability
-  const sessionManager =
-    deps.sessionManager ?? new SessionManager(PROFILES_DIR, process.env['BROWSER_EGRESS_PROXY'])
+  const egressProxy = process.env['BROWSER_EGRESS_PROXY']
+  const egressSecret = egressProxy ? readSecret('EGRESS_CONTROL_SECRET') : undefined
+  const sessionManager = deps.sessionManager ?? new SessionManager(PROFILES_DIR, egressProxy, {
+    ...(egressProxy && egressSecret ? { egressControl: { baseUrl: process.env['BROWSER_EGRESS_CONTROL_URL'] ?? egressProxy, secret: egressSecret } } : {}),
+  })
+  const socialGuard = deps.socialGuard ?? (!deps.exec ? new SocialGuard(deps.sessionManager ? {} : { directory: PROFILES_DIR }) : undefined)
   const checkCache = new Map<string, CheckCacheEntry>()
+  const inFlight = new Map<string, { fingerprint: string; result: Promise<ExecResult> }>()
 
   const app = Fastify({
     ...(process.env['VITEST'] ? { logger: { level: 'error' } } : {}),
+  })
+  // Close login waits and screencasts before Fastify waits for upgraded
+  // sockets. Context.close flushes persistent profiles before egress revocation.
+  const screencastStops = new Set<Promise<void>>()
+  app.addHook('preClose', async () => {
+    await sessionManager.closeAll()
+    await Promise.allSettled([...screencastStops])
   })
 
   // Fastify's own errors (body parse, payload too large, bad content type)
@@ -155,6 +180,14 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
   // HMAC auth on everything except GET /v1/health. Other GETs sign path + query.
   await app.register(makeHmacPlugin(rpcSecret))
 
+  app.addHook('preHandler', async (request, reply) => {
+    const body = bodyOf(request.body)
+    if (!body || body['egress_policy'] === undefined) return
+    if (!isValidConnectionId(body['connection_id'])) return sendError(reply, invalidParams('invalid connection_id'))
+    try { sessionManager.configureEgress(body['connection_id'], parseEgressPolicy(body['egress_policy'])) }
+    catch (error) { return sendError(reply, invalidParams(error instanceof Error ? error.message : 'invalid egress policy')) }
+  })
+
   // ── Health ───────────────────────────────────────────────────────────────
   app.get('/v1/health', async () => {
     return sessionManager.getHealthStatus()
@@ -168,7 +201,7 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     if (!body) return sendError(reply, invalidParams('body must be a JSON object'))
     const bad = connectionIdError(body['connection_id'])
     if (bad) return sendError(reply, invalidParams(bad))
-    const extra = Object.keys(body).filter((k) => k !== 'connection_id')
+    const extra = Object.keys(body).filter((k) => k !== 'connection_id' && k !== 'egress_policy')
     if (extra.length > 0) {
       return sendError(
         reply,
@@ -300,8 +333,14 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     if (!isNonEmptyString(execId)) return sendError(reply, invalidParams('exec_id is required'))
     const capability = body['capability']
     if (!isNonEmptyString(capability)) return sendError(reply, invalidParams('capability is required'))
+    const connectorId = body['connector_id']
+    if (connectorId !== undefined && !isNonEmptyString(connectorId)) {
+      return sendError(reply, invalidParams('connector_id must be a non-empty string'))
+    }
     const params = body['params'] ?? {}
     if (bodyOf(params) === undefined) return sendError(reply, invalidParams('params must be an object'))
+    if (body['diagnostics'] !== undefined && typeof body['diagnostics'] !== 'boolean') return sendError(reply, invalidParams('diagnostics must be a boolean'))
+    const diagnostics = body['diagnostics'] === true ? new BrowserDiagnostics() : undefined
     const deadline = parseDeadline(body['deadline_ms'], true)
     if (!deadline.ok || deadline.value === undefined) {
       return sendError(reply, invalidParams(deadline.ok ? 'deadline_ms is required' : deadline.error))
@@ -309,31 +348,74 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     const deadlineMs = deadline.value
     const connectionId = body['connection_id'] as string
 
-    // Idempotency: replay a cached result for a repeated exec_id
-    const cached = checkCache.get(execId)
-    if (cached && Date.now() < cached.expiresAt) {
-      return reply.send(cached.result)
+    if (sessionManager.isLoginInProgress(connectionId)) {
+      diagnostics?.start('browser.session', '准备浏览器会话')('error', '当前连接的远程登录尚未结束', 'LOGIN_REQUIRED')
+      return reply.send({ status: 'error', error: workerError('LOGIN_REQUIRED', 'finish the current remote login before querying', 'complete login in the admin screen'),
+        ...(diagnostics ? { diagnostics: diagnostics.finish() } : {}) })
     }
 
-    let result: ExecResult
-    try {
-      // One execution at a time per connection (design §13.1): a second request
-      // waits for the first instead of sharing the same browser context. The
-      // lease keeps idle reclaim away; the deadline covers launch, lock wait and exec.
-      result = await withDeadline(deadlineMs, (signal) =>
-        sessionManager.withLockedEntry(
-          connectionId,
-          (entry) => exec(entry.context, capability, params as Record<string, unknown>, deadlineMs, signal),
-          signal,
-        ),
-      )
-    } catch (e) {
-      return reply.send({ status: 'error', error: errorFrom(e, 'BROWSER_UNAVAILABLE') } satisfies ExecResult)
-    }
+    const fingerprint = canonical({ connectionId, connectorId: connectorId ?? 'bilibili', capability, params, diagnostics: Boolean(diagnostics) })
     const now = Date.now()
-    for (const [id, c] of checkCache) if (c.expiresAt <= now) checkCache.delete(id)
-    checkCache.set(execId, { result, expiresAt: now + CHECK_CACHE_TTL_MS })
-    return reply.send(result)
+    for (const [id, entry] of checkCache) if (entry.expiresAt <= now) checkCache.delete(id)
+    // Bind execution ids to their original inputs, including the connection.
+    // A result must never be replayed for a different account or operation.
+    const cached = checkCache.get(execId)
+    const running = inFlight.get(execId)
+    if ((cached && cached.fingerprint !== fingerprint) || (running && running.fingerprint !== fingerprint)) {
+      return sendError(reply, invalidParams('exec_id was already used with different connection, capability or params'))
+    }
+    if (cached) {
+      return reply.send(cached.result)
+    }
+    if (running) return reply.send(await running.result)
+
+    const result = (async (): Promise<ExecResult> => {
+      const sessionReady = diagnostics?.start('browser.session', '准备浏览器会话')
+      try {
+        // The in-flight promise is shared before waiting on the connection
+        // lock, so simultaneous retries cannot execute the operation twice.
+        const output = await withDeadline(deadlineMs, (signal) =>
+          sessionManager.withLockedEntry(
+            connectionId,
+            async (entry) => {
+              sessionReady?.('success', '已取得此连接的独立会话和执行锁')
+              const guardReady = socialGuard ? diagnostics?.start('browser.guard', '检查查询频率与账号状态') : undefined
+              const stopped = await socialGuard?.before(connectionId)
+              if (stopped) {
+                guardReady?.('error', stopped.error?.what_happened, stopped.error?.code)
+                return stopped
+              }
+              guardReady?.('success', '本次查询符合冷却期和每日预算')
+              const args = [entry.context, capability, params as Record<string, unknown>, deadlineMs, signal, connectorId] as const
+              const result = diagnostics ? await exec(...args, diagnostics) : await exec(...args)
+              await socialGuard?.after(connectionId, result)
+              return result
+            },
+            signal,
+          ),
+        )
+        const recorded = diagnostics ? { ...output, diagnostics: diagnostics.finish() } : output
+        checkCache.set(execId, { fingerprint, result: recorded, expiresAt: Date.now() + CHECK_CACHE_TTL_MS })
+        return recorded
+      } catch (e) {
+        const error = errorFrom(e, 'BROWSER_UNAVAILABLE')
+        diagnostics?.interrupt(error.code)
+        return { status: 'error', error, ...(diagnostics ? { diagnostics: diagnostics.finish() } : {}) }
+      } finally {
+        inFlight.delete(execId)
+      }
+    })()
+    inFlight.set(execId, { fingerprint, result })
+    return reply.send(await result)
+  })
+
+  // Explicit operator action; the server must require step-up and audit it.
+  app.post('/v1/safety/resume', async (request, reply) => {
+    const body = bodyOf(request.body)
+    const bad = connectionIdError(body?.['connection_id'])
+    if (!body || bad) return sendError(reply, invalidParams(bad ?? 'body must be an object'))
+    await socialGuard?.resume(body['connection_id'] as string)
+    return reply.send({ ok: true })
   })
 
   // ── POST /v1/cancel ──────────────────────────────────────────────────────
@@ -362,6 +444,10 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     if (whoami !== undefined && !isNonEmptyString(whoami)) {
       return sendError(reply, invalidParams('whoami must be a non-empty capability id'))
     }
+    const connectorId = body['connector_id']
+    if (connectorId !== undefined && !isNonEmptyString(connectorId)) {
+      return sendError(reply, invalidParams('connector_id must be a non-empty string'))
+    }
     const deadline = parseDeadline(body['deadline_ms'], true)
     if (!deadline.ok || deadline.value === undefined) {
       return sendError(reply, invalidParams(deadline.ok ? 'deadline_ms is required' : deadline.error))
@@ -369,12 +455,19 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     return reply.send(
       await probeLoginState(
         sessionManager,
-        exec,
+        async (...args) => {
+          const stopped = await socialGuard?.before(body['connection_id'] as string)
+          if (stopped) return stopped
+          const result = await exec(...args)
+          await socialGuard?.after(body['connection_id'] as string, result)
+          return result
+        },
         {
           connectionId: body['connection_id'] as string,
           loginUrl: loginUrl.value,
           successWhen: conditions.conditions,
           ...(whoami !== undefined ? { whoami } : {}),
+          ...(connectorId !== undefined ? { connectorId } : {}),
           deadlineMs: deadline.value,
         },
         deps.probeTiming ?? {},
@@ -394,6 +487,10 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     const connectionId = sessionManager.resolveStreamToken(token)
     if (connectionId === undefined) {
       socket.close(1008, 'invalid or expired token')
+      return
+    }
+    if (!sessionManager.isLoginInProgress(connectionId)) {
+      socket.close(1000, 'login session ended')
       return
     }
 
@@ -418,9 +515,13 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
       detach()
       if (qrTimer) clearInterval(qrTimer)
       if (onContextClose) entry?.context.off('close', onContextClose)
-      session?.stop().catch((e: Error) => {
-        app.log.debug({ err: e.message }, 'screencast stop failed')
-      })
+      if (session) {
+        const stopped = session.stop().catch((e: Error) => {
+          app.log.debug({ err: e.message }, 'screencast stop failed')
+        })
+        screencastStops.add(stopped)
+        void stopped.finally(() => screencastStops.delete(stopped))
+      }
     }
     socket.on('close', cleanup)
     socket.on('error', cleanup)
@@ -433,12 +534,17 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     onContextClose = () => closeWith(1011, 'browser closed')
     entry.context.once('close', onContextClose)
 
+    const viewport = page.viewportSize()
+    if (!viewport) {
+      closeWith(1011, 'browser viewport unavailable')
+      return
+    }
     const qrSelector = sessionManager.getQrSelector(connectionId)
     const started = new ScreencastSession(page)
     try {
       await started.start({}, (data, ts) => {
         if (socket.readyState === WS_OPEN) {
-          socket.send(JSON.stringify({ type: 'frame', data, ts }))
+          socket.send(JSON.stringify({ type: 'frame', data, ts, width: viewport.width, height: viewport.height }))
         }
       })
     } catch (e) {
@@ -453,18 +559,46 @@ export async function buildBrowserServer(deps: BrowserServerDeps = {}) {
     }
     session = started
 
-    qrTimer = setInterval(() => {
-      void started
-        .captureQrSnapshot(qrSelector)
-        .then((data) => {
-          if (socket.readyState === WS_OPEN) {
-            socket.send(JSON.stringify({ type: 'qr', data, ts: Date.now() }))
-          }
-        })
-        .catch(() => {
-          // Snapshot failures are transient — keep the frame stream alive.
-        })
-    }, QR_SNAPSHOT_INTERVAL_MS)
+    // The HMAC-authenticated upgrade and one-use stream token identify the
+    // connection. Only bounded, explicit input commands reach CDP. Queue them
+    // to preserve key/mouse order and never log text or password contents.
+    let inputQueue = Promise.resolve()
+    let pendingInputs = 0
+    socket.on('message', (raw: Buffer, isBinary: boolean) => {
+      if (closed || isBinary || raw.length > 16_384) return
+      let message: unknown
+      try { message = JSON.parse(raw.toString()) } catch { return }
+      const envelope = bodyOf(message)
+      if (envelope?.['type'] !== 'input') return
+      const input = parseScreenInput(envelope['event'])
+      if (!input || pendingInputs >= 100) return
+      pendingInputs++
+      inputQueue = inputQueue.then(async () => {
+        if (!closed) await started.input(input)
+      }).catch(() => {
+        if (!closed && socket.readyState === WS_OPEN) {
+          socket.send(JSON.stringify({ type: 'input_error', message: '页面暂时无法接收输入，请重试或重新打开画面。' }))
+        }
+      }).finally(() => { pendingInputs-- })
+    })
+
+    let qrPending = false
+    const sendQrSnapshot = async () => {
+      if (closed || qrPending) return
+      qrPending = true
+      try {
+        const data = await started.captureQrSnapshot(qrSelector).catch(() => null)
+        if (!closed && socket.readyState === WS_OPEN) {
+          // null clears a code that disappeared, including transient failures;
+          // retaining an old login QR would invite scanning an expired code.
+          socket.send(JSON.stringify({ type: 'qr', data, ts: Date.now() }))
+        }
+      } finally {
+        qrPending = false
+      }
+    }
+    qrTimer = setInterval(() => { void sendQrSnapshot() }, QR_SNAPSHOT_INTERVAL_MS)
+    void sendQrSnapshot()
   })
 
   return { app, sessionManager }
@@ -477,6 +611,15 @@ const isMain =
 
 if (isMain) {
   const { app } = await buildBrowserServer()
-  await app.listen({ port: PORT, host: '0.0.0.0' })
-  app.log.info(`webridge-browser listening on port ${PORT}`)
+  let stopping = false
+  const stop = () => {
+    if (stopping) return
+    stopping = true
+    void app.close().then(() => process.exit(0), () => process.exit(1))
+  }
+  process.once('SIGTERM', stop)
+  process.once('SIGINT', stop)
+  try { await app.listen({ port: PORT, host: '0.0.0.0' }) }
+  catch (error) { await app.close(); throw error }
+  app.log.info(`owngate-browser listening on port ${PORT}`)
 }

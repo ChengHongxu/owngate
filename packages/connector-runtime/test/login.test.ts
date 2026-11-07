@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { loadManifest, loadManifestFile } from '../src/loader.js';
 
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const MANIFEST_PATH = resolve(__dirname, '../../../connectors/test-connector/manifest.yaml');
+const MANIFEST_PATH = resolve(__dirname, './fixtures/connectors/test-connector/manifest.yaml');
 
 const BASE = `
 connector: bilibili

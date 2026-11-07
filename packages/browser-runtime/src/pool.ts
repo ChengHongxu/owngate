@@ -41,6 +41,8 @@ export interface BrowserPoolOptions {
     /** e.g. 'http://egress:3128' */
     proxyServer: string
     credentials: ProxyCredentialStore
+    /** Confirm a live policy lease before every launch or reuse. */
+    authorize?: (connectionId: string) => Promise<void>
   }
 }
 
@@ -88,6 +90,10 @@ export class BrowserPool {
     assertConnectionId(connectionId)
     const existing = this.entries.get(connectionId)
     if (existing) {
+      if (this.proxy?.authorize) {
+        await this.proxy.authorize(connectionId)
+        if (this.entries.get(connectionId) !== existing) return this.acquire(connectionId)
+      }
       this.resetIdleTimer(connectionId)
       return existing
     }
@@ -180,6 +186,7 @@ export class BrowserPool {
     // Include launches still in flight; close() waits for them.
     const ids = new Set([...this.entries.keys(), ...this.pending.keys()])
     await Promise.all(Array.from(ids, (id) => this.close(id)))
+    await Promise.all([...this.closing.values()])
   }
 
   /**
@@ -220,6 +227,7 @@ export class BrowserPool {
   }
 
   private async create(connectionId: string): Promise<BrowserEntry> {
+    if (this.proxy?.authorize) await this.proxy.authorize(connectionId)
     const closing = this.closing.get(connectionId)
     if (closing) await closing
 
@@ -297,6 +305,10 @@ export class BrowserPool {
 
     const context = await chromium.launchPersistentContext(profilePath, {
       headless: false,
+      // The worker owns shutdown: Playwright's default signal listeners close
+      // Chromium immediately, racing context.close() and dropping cookie writes.
+      handleSIGTERM: false,
+      handleSIGINT: false,
       // Playwright defaults this to false, which injects --no-sandbox.
       // Design doc §4.4.1/§12.2 forbids running without the Chromium sandbox.
       chromiumSandbox: true,

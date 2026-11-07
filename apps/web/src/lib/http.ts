@@ -19,6 +19,7 @@ export class ApiError extends Error {
 
 /** 前端自己产生的码：用户取消了二次验证对话框 */
 export const STEP_UP_CANCELLED = 'STEP_UP_CANCELLED'
+export type StepUpReason = 'step_up' | 'setup'
 
 /**
  * 登录、二次验证、TOTP 确认等接口在"凭据不对"时也回 401，
@@ -38,28 +39,29 @@ export function isSessionLost(err: unknown): boolean {
 }
 
 export function isStepUpRequired(err: unknown): boolean {
-  return err instanceof ApiError && err.status === 403 && err.code === 'STEP_UP_REQUIRED'
+  return err instanceof ApiError && err.status === 403 && (err.code === 'STEP_UP_REQUIRED' || err.code === 'MFA_SETUP_REQUIRED')
 }
 
 /** 把非 2xx 响应体转成 ApiError。兼容 {error, code} 与 {code, what_happened, next_step} 两种形态。 */
 export function toApiError(status: number, statusText: string, body: unknown, text: string): ApiError {
   const b = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>
+  const nested = typeof b['error'] === 'object' && b['error'] !== null ? b['error'] as Record<string, unknown> : {}
   const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
   const message =
-    str(b['what_happened']) ?? str(b['message']) ?? str(b['error']) ?? (text !== '' ? text : statusText)
-  return new ApiError(status, str(b['code']), message, str(b['next_step']))
+    str(b['what_happened']) ?? str(b['message']) ?? str(b['error']) ?? str(nested['message']) ?? (text !== '' ? text : statusText)
+  return new ApiError(status, str(b['code']) ?? str(nested['code']), message, str(b['next_step']) ?? str(nested['next_step']))
 }
 
 /**
  * 二次验证重试包装：请求返回 403 STEP_UP_REQUIRED 时调用 stepUp()（弹验证框），
  * 验证成功后自动重试原请求一次；第二次仍失败则原样抛出，不再弹框。
  */
-export async function withStepUp<T>(run: () => Promise<T>, stepUp: () => Promise<boolean>): Promise<T> {
+export async function withStepUp<T>(run: () => Promise<T>, stepUp: (reason?: StepUpReason) => Promise<boolean>): Promise<T> {
   try {
     return await run()
   } catch (err) {
     if (!isStepUpRequired(err)) throw err
-    const ok = await stepUp()
+    const ok = await stepUp(err instanceof ApiError && err.code === 'MFA_SETUP_REQUIRED' ? 'setup' : 'step_up')
     if (!ok) {
       throw new ApiError(403, STEP_UP_CANCELLED, '已取消二次验证，操作未执行')
     }
@@ -72,19 +74,19 @@ export async function withStepUp<T>(run: () => Promise<T>, stepUp: () => Promise
  * prompt 为 null（对话框尚未挂载）时直接返回 false。
  */
 export function createStepUpGate(): {
-  setPrompt: (prompt: (() => Promise<boolean>) | null) => void
-  request: () => Promise<boolean>
+  setPrompt: (prompt: ((reason?: StepUpReason) => Promise<boolean>) | null) => void
+  request: (reason?: StepUpReason) => Promise<boolean>
 } {
-  let prompt: (() => Promise<boolean>) | null = null
+  let prompt: ((reason?: StepUpReason) => Promise<boolean>) | null = null
   let inflight: Promise<boolean> | null = null
   return {
     setPrompt(p) {
       prompt = p
     },
-    request() {
+    request(reason) {
       if (inflight) return inflight
       if (!prompt) return Promise.resolve(false)
-      const current = prompt()
+      const current = prompt(reason)
         .catch(() => false)
         .finally(() => {
           inflight = null
@@ -96,7 +98,7 @@ export function createStepUpGate(): {
 }
 
 export interface CallOptions {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
   /** 会被 JSON.stringify；省略则不发 body，也不带 content-type */
   body?: unknown
   /** 默认 true。二次验证接口自身必须关掉，避免循环 */
@@ -107,7 +109,7 @@ export interface CallOptions {
 
 export interface RequesterDeps {
   fetch: (input: string, init: RequestInit) => Promise<Response>
-  stepUp: () => Promise<boolean>
+  stepUp: (reason?: StepUpReason) => Promise<boolean>
   onSessionLost: (err: ApiError) => void
 }
 
@@ -148,6 +150,8 @@ export function createRequester(deps: RequesterDeps) {
 
 const AUTH_ERROR_TEXT: Record<string, string> = {
   INVALID_CREDENTIALS: '用户名或密码不正确。',
+  INVALID_CURRENT_PASSWORD: '当前密码不正确。',
+  ACCOUNT_RATE_LIMIT: '账户修改尝试过于频繁，请稍后再试。',
   TOTP_REQUIRED: '该账号已启用 TOTP，请填写验证码。',
   TOTP_INVALID: '验证码不正确或已过期。',
   TOTP_NOT_ENABLED: '尚未启用 TOTP。',
@@ -158,6 +162,10 @@ const AUTH_ERROR_TEXT: Record<string, string> = {
   NO_SESSION: '尚未登录。',
   SESSION_EXPIRED: '登录已过期，请重新登录。',
   STEP_UP_REQUIRED: '需要二次验证。',
+  MFA_SETUP_REQUIRED: '首次配置验证方式前，请再次输入密码。',
+  PASSKEY_REQUIRED: '此账号已注册 Passkey，请使用 Passkey 验证。',
+  AUTH_FLOW_LIMIT: '待完成的验证过多，请稍后再试。',
+  TOTP_ENROLLMENT_EXPIRED: '绑定流程已过期或认证配置已改变，请重新开始；原验证码仍然有效。',
   [STEP_UP_CANCELLED]: '已取消二次验证，操作未执行。',
 }
 

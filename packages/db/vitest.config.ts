@@ -9,7 +9,7 @@ export default defineConfig({
     },
     // Run the DB worker from TS source via tsx so tests don't depend on a build step
     env: {
-      WEBRIDGE_DB_WORKER_PATH: resolve(__dirname, 'src/worker.ts'),
+      OWNGATE_DB_WORKER_PATH: resolve(__dirname, 'src/worker.ts'),
     },
     testTimeout: 15000,
   },

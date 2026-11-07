@@ -5,16 +5,19 @@ import {
   BrowserPool,
   XvfbManager,
   ProxyCredentialStore,
+  EgressController,
   InvalidConnectionIdError,
   checkLoginOnce,
   waitForLogin,
-} from '@webridge/browser-runtime'
+} from '@owngate/browser-runtime'
 import type {
   BrowserEntry,
+  EgressPolicy,
+  EgressControlConfig,
   BrowserPoolOptions,
   LoginCondition,
   LoginResult,
-} from '@webridge/browser-runtime'
+} from '@owngate/browser-runtime'
 import { LoginStateTracker, type LoginStateSnapshot } from './login-state.js'
 import type { ImportedCookie } from './cookies.js'
 import { BrowserUnavailableError, CookieRejectedError } from './errors.js'
@@ -40,6 +43,7 @@ export interface StartLoginOptions {
 export interface SessionManagerOptions {
   /** Browser idle reclaim; default the pool's 10 minutes. */
   idleTimeoutMs?: number
+  egressControl?: EgressControlConfig
 }
 
 interface StreamTokenEntry {
@@ -77,12 +81,25 @@ export class SessionManager {
   private readonly screens = new Map<string, Set<() => void>>()
   /** Per-connection proxy credentials. */
   private readonly proxyCredentials = new ProxyCredentialStore()
+  private readonly egress: EgressController | undefined
+  private stopping = false
+  private closing: Promise<void> | undefined
 
   constructor(
     private readonly profilesDir: string,
     private readonly egressProxyServer?: string,
     private readonly options: SessionManagerOptions = {},
-  ) {}
+  ) {
+    if (egressProxyServer) {
+      if (!options.egressControl) throw new Error('egress proxy requires authenticated control configuration')
+      this.egress = new EgressController(options.egressControl, this.proxyCredentials, async (id) => {
+        // Fail closed immediately, including tabs left open between RPCs.
+        await this.pool?.get(id)?.context.close()
+      })
+    }
+  }
+
+  configureEgress(connectionId: string, policy: EgressPolicy): void { this.assertOpen(); this.egress?.configure(connectionId, policy) }
 
   async openSession(connectionId: string): Promise<{ session_id: string }> {
     await this.entry(connectionId)
@@ -95,6 +112,8 @@ export class SessionManager {
     this.endScreen(connectionId)
     this.successConditions.delete(connectionId)
     await this.getPool().close(connectionId)
+    await this.egress?.revoke(connectionId)
+    this.proxyCredentials.delete(connectionId)
   }
 
   /**
@@ -108,6 +127,7 @@ export class SessionManager {
     url: string,
     options: StartLoginOptions,
   ): Promise<{ stream_token: string }> {
+    this.assertOpen()
     const { successWhen, qrSelector } = options
     const waitMs = Math.min(options.deadlineMs ?? DEFAULT_LOGIN_WAIT_MS, DEFAULT_LOGIN_WAIT_MS)
     const releaseLease = this.getPool().hold(connectionId)
@@ -119,6 +139,7 @@ export class SessionManager {
       const { entry, attemptId, signal } = await this.withLockedEntry(connectionId, async (entry) => {
         const page = entry.context.pages()[0] ?? (await entry.context.newPage())
         await page.goto(url)
+        this.assertOpen()
         // Marked pending before the lock is released, so a probe queued on the
         // lock sees the login and does not navigate away from it.
         return { entry, ...this.loginStatus.begin(connectionId) }
@@ -213,6 +234,7 @@ export class SessionManager {
    * session ends (success, timeout, stop, closeSession).
    */
   attachScreen(connectionId: string, close: () => void): () => void {
+    this.assertOpen()
     const releaseLease = this.getPool().hold(connectionId)
     let set = this.screens.get(connectionId)
     if (!set) {
@@ -237,11 +259,13 @@ export class SessionManager {
    * already in flight, and relaunches after an idle reclaim.
    */
   async entry(connectionId: string): Promise<BrowserEntry> {
+    this.assertOpen()
     return this.getPool().acquire(connectionId)
   }
 
   /** Lease + entry, relaunching a reclaimed browser on the same profile. */
   async lease(connectionId: string): Promise<{ entry: BrowserEntry; release: () => void }> {
+    this.assertOpen()
     return this.getPool().lease(connectionId)
   }
 
@@ -260,10 +284,12 @@ export class SessionManager {
     fn: (entry: BrowserEntry) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
+    this.assertOpen()
     const pool = this.getPool()
     const releaseLease = pool.hold(connectionId)
     try {
       for (let attempt = 0; ; attempt++) {
+        this.assertOpen()
         signal?.throwIfAborted()
         let entry: BrowserEntry
         try {
@@ -311,15 +337,24 @@ export class SessionManager {
     }
   }
 
-  async closeAll(): Promise<void> {
+  closeAll(): Promise<void> {
+    if (this.closing) return this.closing
+    this.stopping = true
     this.loginStatus.clearAll()
     for (const id of Array.from(this.screens.keys())) this.endScreen(id)
     this.streamTokens.clear()
     this.qrSelectors.clear()
     this.successConditions.clear()
-    await this.getPool().closeAll()
+    this.closing = (async () => {
+      try { await this.pool?.closeAll() }
+      finally { await this.egress?.close() }
+    })()
+    return this.closing
   }
 
+  private assertOpen(): void {
+    if (this.stopping) throw new BrowserUnavailableError('browser worker is shutting down')
+  }
   private getPool(): BrowserPool {
     if (this.pool) return this.pool
     const options: BrowserPoolOptions = {
@@ -329,6 +364,7 @@ export class SessionManager {
             proxy: {
               proxyServer: this.egressProxyServer,
               credentials: this.proxyCredentials,
+              authorize: (id: string) => this.egress!.ensure(id),
             },
           }
         : {}),

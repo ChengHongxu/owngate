@@ -1,5 +1,5 @@
 {
-  "name": "@webridge/schema-meta",
+  "name": "@owngate/schema-meta",
   "version": "0.1.0",
   "private": true,
   "type": "module",

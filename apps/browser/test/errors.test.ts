@@ -180,7 +180,7 @@ describe('worker error bodies', () => {
     const { app, sm } = await server()
     const entry = await sm.entry('c1')
     await entry.context.pages()[0]!.goto('https://passport.bilibili.com/login')
-    expectSpecError(await post(app, '/v1/check', checkBody('c1')), 'LOGIN_REQUIRED', 200)
+    expectSpecError(await post(app, '/v1/check', { ...checkBody('c1'), params: {} }), 'LOGIN_REQUIRED', 200)
   })
 })
 

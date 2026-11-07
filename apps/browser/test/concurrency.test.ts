@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import type { BrowserContext } from 'playwright'
 import { buildBrowserServer } from '../src/main.js'
 import type { ExecResult } from '../src/exec.js'
-import { FakeSessionManager, SECRET, checkBody, post, sleep } from './helpers.js'
+import { FakeSessionManager, SECRET, checkBody, post, sleep, until } from './helpers.js'
 
 interface Span {
   connectionId: string
@@ -73,6 +73,29 @@ describe('/v1/check concurrency', () => {
     ])
     expect(spans).toHaveLength(2)
     expect(overlaps(spans[0]!, spans[1]!)).toBe(true)
+  })
+
+  it('shares one execution for simultaneous retries with the same exec_id', async () => {
+    const body = checkBody('same-retry')
+    const [first, second] = await Promise.all([post(app, '/v1/check', body), post(app, '/v1/check', body)])
+    expect(first.json()).toEqual(second.json())
+    expect(spans).toHaveLength(1)
+    const replay = await post(app, '/v1/check', body)
+    expect(replay.json()).toEqual(first.json())
+    expect(spans).toHaveLength(1)
+  })
+
+  it('rejects exec_id reuse for a different account or parameters', async () => {
+    const body = checkBody('identity-a')
+    const first = post(app, '/v1/check', body).then((response) => response)
+    await until(() => sm.getEntry('identity-a') !== undefined)
+    const conflict = await post(app, '/v1/check', { ...body, connection_id: 'identity-b' })
+    expect(conflict.statusCode).toBe(400)
+    expect(conflict.json().code).toBe('INVALID_PARAMS')
+    await first
+    const changed = await post(app, '/v1/check', { ...body, params: { conn: 'changed' } })
+    expect(changed.statusCode).toBe(400)
+    expect(spans).toHaveLength(1)
   })
 })
 

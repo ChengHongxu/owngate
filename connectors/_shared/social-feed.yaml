@@ -1,0 +1,114 @@
+# Missing metrics remain absent and receive field-level unknown status.
+social_feed_item:
+  type: object
+  additionalProperties: false
+  required:
+  - platform
+  - id
+  - url
+  - kind
+  - author
+  - media
+  - published_at
+  - metrics
+  properties:
+    platform:
+      type: string
+      enum:
+      - bilibili
+      - xiaohongshu
+      - zhihu
+      - x
+      x-sensitivity: content
+    id:
+      type: string
+      x-sensitivity: content
+    url:
+      type: string
+      format: uri
+      x-sensitivity: content
+      x-untrusted: true
+    kind:
+      type: string
+      enum:
+      - video
+      - note
+      - answer
+      - article
+      - post
+      x-sensitivity: content
+    author:
+      type: object
+      properties:
+        id:
+          type:
+          - string
+          - 'null'
+          x-sensitivity: pii
+        name:
+          type:
+          - string
+          - 'null'
+          x-sensitivity: pii
+          x-untrusted: true
+      required:
+      - id
+      - name
+      additionalProperties: false
+    title:
+      type: string
+      x-sensitivity: content
+      x-untrusted: true
+    text:
+      type: string
+      x-sensitivity: content
+      x-untrusted: true
+    media:
+      type: array
+      items:
+        type: object
+        properties:
+          type:
+            type: string
+            enum:
+            - image
+            - video
+          url:
+            type: string
+            format: uri
+            x-untrusted: true
+        required:
+        - type
+        - url
+        additionalProperties: false
+      x-sensitivity: content
+    published_at:
+      type:
+      - string
+      - 'null'
+      format: date-time
+      x-sensitivity: content
+    metrics:
+      type: object
+      properties:
+        likes:
+          type: number
+          minimum: 0
+          x-unit: count
+          x-sensitivity: content
+        comments:
+          type: number
+          minimum: 0
+          x-unit: count
+          x-sensitivity: content
+        shares:
+          type: number
+          minimum: 0
+          x-unit: count
+          x-sensitivity: content
+        views:
+          type: number
+          minimum: 0
+          x-unit: count
+          x-sensitivity: content
+      additionalProperties: false

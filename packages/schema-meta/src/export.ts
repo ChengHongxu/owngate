@@ -18,7 +18,7 @@ export function toJSONSchema(schema: ZodType): Record<string, unknown> {
       def: ZodTypeDef,
     ): JsonSchema7Type | undefined => {
       if (!jsonSchema) return jsonSchema;
-      const meta = getFieldMetaFromDef(def as Record<symbol, unknown>);
+      const meta = getFieldMetaFromDef(def);
       if (!meta) return jsonSchema;
 
       const out = { ...jsonSchema } as Record<string, unknown>;
@@ -45,20 +45,33 @@ export function findUnannotatedFields(
   schema: Record<string, unknown>,
   path = '',
 ): string[] {
-  const missing: string[] = [];
-
-  if (schema['type'] === 'object' && schema['properties']) {
-    const props = schema['properties'] as Record<string, Record<string, unknown>>;
-    for (const [key, prop] of Object.entries(props)) {
-      const fieldPath = path ? `${path}.${key}` : key;
-      if (prop['x-sensitivity'] === undefined && prop['x-untrusted'] === undefined) {
-        missing.push(fieldPath);
-      }
-      if (prop['type'] === 'object') {
-        missing.push(...findUnannotatedFields(prop, fieldPath));
-      }
+  const missing = new Set<string>();
+  const isSchema = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+  function visit(current: Record<string, unknown>, at: string, ancestors: Set<object>): void {
+    // The exported document is JSON, but callers may also pass an in-memory
+    // schema graph. Follow each data path once without looping on graph cycles.
+    if (ancestors.has(current)) return;
+    const next = new Set([...ancestors, current]);
+    const properties = current['properties'];
+    // JSON Schema permits omitted type and nullable unions such as
+    // type: ['object', 'null']; their named properties still need annotations.
+    if (isSchema(properties)) for (const [key, value] of Object.entries(properties)) {
+      const fieldPath = at ? `${at}.${key}` : key;
+      if (!isSchema(value) || value['x-sensitivity'] === undefined && value['x-untrusted'] === undefined) missing.add(fieldPath);
+      if (isSchema(value)) visit(value, fieldPath, next);
     }
+    const items = current['items'];
+    if (isSchema(items)) visit(items, `${at}[]`, next);
+    else if (Array.isArray(items)) items.forEach((item, index) => { if (isSchema(item)) visit(item, `${at}[${index}]`, next); });
+    const prefixItems = current['prefixItems'];
+    if (Array.isArray(prefixItems)) prefixItems.forEach((item, index) => { if (isSchema(item)) visit(item, `${at}[${index}]`, next); });
+    for (const key of ['anyOf', 'oneOf', 'allOf']) {
+      const branches = current[key];
+      if (Array.isArray(branches)) for (const branch of branches) if (isSchema(branch)) visit(branch, at, next);
+    }
+    if (isSchema(current['additionalProperties'])) visit(current['additionalProperties'], at ? `${at}.*` : '*', next);
+    if (isSchema(current['additionalItems'])) visit(current['additionalItems'], `${at}[]`, next);
   }
-
-  return missing;
+  visit(schema, path, new Set());
+  return [...missing];
 }

@@ -2,7 +2,7 @@
 
 import type { FastifyPluginAsync } from 'fastify'
 import fp from 'fastify-plugin'
-import { verifyRequest } from '@webridge/browser-runtime'
+import { CLOCK_SKEW_MS, verifyRequest } from '@owngate/browser-runtime'
 import { workerError } from './errors.js'
 
 declare module 'fastify' {
@@ -19,6 +19,7 @@ const UNAUTH = workerError(
 
 export function makeHmacPlugin(secret: string) {
   const plugin: FastifyPluginAsync = async (app) => {
+    const acceptedNonces = new Map<string, number>()
     app.decorateRequest('rawBody', '')
 
     // Capture raw body string before parsing so HMAC can be verified
@@ -42,32 +43,26 @@ export function makeHmacPlugin(secret: string) {
       const pathname = request.url.split('?')[0]
       if (request.method === 'GET' && pathname === '/v1/health') return
 
-      const sig = request.headers['x-wr-sig']
-      const ts = request.headers['x-wr-ts']
+      const sig = request.headers['x-og-sig']
+      const ts = request.headers['x-og-ts']
+      const nonce = request.headers['x-og-nonce']
 
-      if (typeof sig !== 'string' || typeof ts !== 'string') {
+      if (typeof sig !== 'string' || typeof ts !== 'string' || typeof nonce !== 'string') {
         return reply.status(401).send(UNAUTH)
       }
 
-      // What a GET signs: it has no body, so it signs its path + query exactly
-      // as sent (e.g. "/v1/login/status?connection_id=abc").
-      //
-      // GET /v1/login/status is not whitelisted like health. Its data is
-      // read-only and holds no secrets, but it does tell the caller which
-      // connection ids exist and whether each one is logged in. Only the
-      // server should learn that, so it must be signed.
-      //
-      // Why not sign an empty string: the HMAC covers the payload only, not
-      // X-Wr-Ts (see hmac.ts). HMAC('') would be the same for every GET, so
-      // one captured signature would act as a permanent key for every GET
-      // route and every connection_id. Signing the URL ties the signature to
-      // one route and one connection_id. Replay of that exact URL is still
-      // possible, the same weakness every POST body already has.
-      const payload = request.method === 'GET' ? request.url : request.rawBody
-
-      if (!verifyRequest(payload, sig, ts, secret)) {
+      const body = request.method === 'GET' ? '' : request.rawBody
+      if (!verifyRequest(body, sig, ts, secret, { method: request.method, path: request.url }, nonce)) {
         return reply.status(401).send(UNAUTH)
       }
+      const now = Date.now()
+      for (const [seen, expiresAt] of acceptedNonces) {
+        if (expiresAt < now) acceptedNonces.delete(seen)
+      }
+      // No await between the lookup and insert: simultaneous identical
+      // requests cannot both pass this one-use check.
+      if (acceptedNonces.has(nonce)) return reply.status(401).send(UNAUTH)
+      acceptedNonces.set(nonce, Number(ts) + CLOCK_SKEW_MS)
     })
   }
 

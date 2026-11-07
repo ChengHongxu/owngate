@@ -5,9 +5,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { buildServer } from '../src/main.js'
 import type { FastifyInstance } from 'fastify'
-import type { ResultEnvelope } from '@webridge/core'
+import type { ResultEnvelope } from '@owngate/core'
 import { adminWithStepUp, tempDbPath } from './helpers/admin.js'
 import type { AdminSession } from './helpers/admin.js'
+import { createServer, type Server } from 'node:http'
+import { fileURLToPath } from 'node:url'
+import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js'
 
 let app: FastifyInstance
 let admin: AdminSession
@@ -15,6 +18,7 @@ let cleanupDb: () => void
 let token: string
 let clientId: string
 let connId: string
+let upstream: Server
 
 const BASE_CAP = {
   id: 'echo.ping',
@@ -42,9 +46,15 @@ const BASE_CAP = {
 } as const
 
 beforeAll(async () => {
+  upstream = createServer((_request, response) => {
+    response.setHeader('content-type', 'application/json')
+    response.end(JSON.stringify({ url: 'fixture-response' }))
+  })
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+  const port = (upstream.address() as { port: number }).port
   const db = tempDbPath()
   cleanupDb = db.cleanup
-  const server = await buildServer({ dbPath: db.path })
+  const server = await buildServer({ dbPath: db.path, connectorsDir: fileURLToPath(new URL('../../../packages/connector-runtime/test/fixtures/connectors', import.meta.url)) })
   app = server.app
   // Admin routes need a session; clients and grants also need step-up (§8.4).
   admin = await adminWithStepUp(app)
@@ -65,17 +75,21 @@ beforeAll(async () => {
     payload: {
       connector_id: 'test-connector',
       label: 'M0 Test Site',
-      config: { base_url: 'https://httpbin.org' },
+      config: { base_url: `http://127.0.0.1:${port}` },
     },
   })
   connId = JSON.parse(connResp.body).id
+  const saved = await app.inject({ method: 'PUT', url: `/admin/connections/${connId}/credentials`,
+    headers: admin.headers, payload: { credentials: { access_token: 'm0-fixture-credential' } } })
+  expect(saved.statusCode).toBe(200)
+  expect(saved.json().verified).toBe(true)
 
   // Create client
   const clientResp = await app.inject({
     method: 'POST',
     url: '/admin/clients',
     headers: admin.headers,
-    payload: { label: 'M0 Test Client', kind: 'cli' },
+    payload: { label: 'M0 Test Client' },
   })
   const clientData = JSON.parse(clientResp.body)
   token = clientData.token
@@ -92,6 +106,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await app.close()
+  await new Promise<void>((resolve, reject) => upstream.close((error) => error ? reject(error) : resolve()))
   cleanupDb()
 })
 
@@ -132,10 +147,11 @@ describe('M0 验收 1 — 三入口信封字段一致', () => {
         },
       },
     })
-    // MCP returns SSE: extract data line
+    expect(resp.statusCode).toBe(200)
+    // Streamable HTTP can return JSON or SSE according to server negotiation.
     const body = resp.body
     const dataLine = body.split('\n').find((l: string) => l.startsWith('data:'))
-    const parsed = JSON.parse(dataLine!.replace('data: ', ''))
+    const parsed = JSON.parse(dataLine ? dataLine.slice(5).trimStart() : body)
     const text = parsed.result?.content?.[0]?.text
     return JSON.parse(text) as ResultEnvelope
   }
@@ -160,6 +176,17 @@ describe('M0 验收 1 — 三入口信封字段一致', () => {
     expect(Object.keys(mcp.data as object).sort()).toEqual(
       Object.keys(rest.data as object).sort(),
     )
+  })
+
+  it('admin invokes the same HTTP manifest and returns the same business data', async () => {
+    const rest = await invokeViaRest()
+    const response = await app.inject({ method: 'POST', url: '/admin/invoke', headers: admin.headers,
+      payload: { connection_id: connId, capability_id: 'echo.ping', input: {}, no_cache: true } })
+    expect(response.statusCode).toBe(200)
+    const adminResult = response.json() as ResultEnvelope
+    expect(adminResult.data).toEqual(rest.data)
+    expect(adminResult.data).toEqual({ message: 'fixture-response' })
+    expect(adminResult.outcome).toBe(rest.outcome)
   })
 
   it('envelope always has required fields', async () => {
@@ -188,7 +215,7 @@ describe('M0 验收 2 — 撤销即时性', () => {
       method: 'POST',
       url: '/admin/clients',
       headers: admin.headers,
-      payload: { label: 'Revoke Test Client', kind: 'cli' },
+      payload: { label: 'Revoke Test Client' },
     })
     const data = JSON.parse(clientResp.body)
     revokeToken = data.token
@@ -229,7 +256,7 @@ describe('M0 验收 2 — 撤销即时性', () => {
     expect(resp.statusCode).toBe(401)
   })
 
-  it('MCP returns error after revocation', async () => {
+  it('MCP initialization refuses a revoked client with HTTP 401', async () => {
     const resp = await app.inject({
       method: 'POST',
       url: '/mcp',
@@ -241,18 +268,16 @@ describe('M0 验收 2 — 撤销即时性', () => {
       payload: {
         jsonrpc: '2.0',
         id: 200,
-        method: 'tools/call',
+        method: 'initialize',
         params: {
-          name: 'query',
-          arguments: { connection_id: connId, capability_id: 'echo.ping', input: {} },
+          protocolVersion: LATEST_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: 'revoked-acceptance-test', version: '1' },
         },
       },
     })
-    const body = resp.body
-    const dataLine = body.split('\n').find((l: string) => l.startsWith('data:'))
-    const parsed = JSON.parse(dataLine!.replace('data: ', ''))
-    // MCP tool error is surfaced as isError: true
-    expect(parsed.result?.isError).toBe(true)
+    expect(resp.statusCode).toBe(401)
+    expect(resp.json()).toMatchObject({ error: { code: 'CLIENT_REVOKED' } })
   })
 })
 
@@ -310,7 +335,7 @@ describe('M0 验收 3 — 错误码一致性', () => {
       method: 'POST',
       url: '/admin/clients',
       headers: admin.headers,
-      payload: { label: 'No Grant Client', kind: 'cli' },
+      payload: { label: 'No Grant Client' },
     })
     const noGrantToken = JSON.parse(noGrantResp.body).token
 
@@ -343,6 +368,8 @@ describe('M0 验收 3 — 错误码一致性', () => {
         },
       },
     })
+    await app.inject({ method: 'POST', url: '/admin/grants', headers: admin.headers,
+      payload: { client_id: clientId, connection_id: connId, capabilities: ['*', 'post.create'] } })
     const resp = await app.inject({
       method: 'POST',
       url: '/api/invoke',
@@ -377,7 +404,7 @@ describe('M0 验收 5 — 缓存语义', () => {
       method: 'POST',
       url: '/api/invoke',
       headers: { authorization: `Bearer ${token}` },
-      payload: { connection_id: connId, capability_id: 'echo.ping', input: {}, no_cache: true },
+      payload: { connection_id: connId, capability_id: 'echo.ping', input: {} },
     })
     // Second call
     const resp = await app.inject({

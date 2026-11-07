@@ -117,7 +117,7 @@ export interface ErrorText {
 export const ERROR_TEXT: Readonly<Record<ErrorCode, Readonly<ErrorText>>> = Object.freeze({
   UNAUTHENTICATED: {
     what_happened: '客户端令牌缺失、无效或已过期',
-    next_step: '在后台签发新的客户端令牌，并用 webridge login 或 MCP 配置更新',
+    next_step: '在后台签发新的客户端令牌，并用 owngate login 或 MCP 配置更新',
   },
   CLIENT_REVOKED: {
     what_happened: '该客户端已被撤销，令牌已失效',
@@ -125,11 +125,11 @@ export const ERROR_TEXT: Readonly<Record<ErrorCode, Readonly<ErrorText>>> = Obje
   },
   CONNECTION_NOT_FOUND: {
     what_happened: '指定的连接不存在',
-    next_step: '用 webridge conn ls 查看可用的连接 ID',
+    next_step: '用 owngate conn ls 查看可用的连接 ID',
   },
   CAPABILITY_NOT_FOUND: {
     what_happened: '该连接上没有这个能力',
-    next_step: '用 webridge cap ls <connection_id> 查看可用的能力 ID',
+    next_step: '用 owngate cap ls <connection_id> 查看可用的能力 ID',
   },
   AUTH_EXPIRED: {
     what_happened: '站点的访问令牌或登录态已失效',
@@ -153,7 +153,7 @@ export const ERROR_TEXT: Readonly<Record<ErrorCode, Readonly<ErrorText>>> = Obje
   },
   CAPABILITY_UNSUPPORTED: {
     what_happened: '该连接不支持此能力',
-    next_step: '用 webridge cap ls <connection_id> 查看该连接支持的能力',
+    next_step: '用 owngate cap ls <connection_id> 查看该连接支持的能力',
   },
   CAPABILITY_DISABLED: {
     what_happened: '此能力已被关闭',

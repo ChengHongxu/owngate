@@ -4,10 +4,11 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { ResultEnvelope } from '@webridge/core';
+import { ok, type ResultEnvelope, type Dispatcher } from '@owngate/core';
 import { buildServer } from '../src/main.js';
 import { adminWithStepUp, tempDbPath } from './helpers/admin.js';
 import type { AdminSession } from './helpers/admin.js';
+import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
 
 const CONNECTOR = 'list-connector';
 
@@ -32,6 +33,10 @@ function cap(id: string, kind: 'query' | 'action' = 'query') {
 }
 
 const CAPS = [cap('a.one'), cap('a.two'), cap('a.write', 'action')];
+// Listing tests isolate the upstream; the HTTP-manifest acceptance suite uses a real local server.
+const dispatcher: Dispatcher = { dispatch: async (conn, capability) => ok({ message: 'fixture' }, {
+  connection_id: conn.id, connection_label: conn.label, capability_id: capability.id, support: { status: 'supported' },
+}) };
 
 async function registerCaps(app: FastifyInstance, admin: AdminSession): Promise<void> {
   for (const capability of CAPS) {
@@ -53,7 +58,9 @@ async function createConnection(app: FastifyInstance, admin: AdminSession, label
     payload: { connector_id: CONNECTOR, label, config: { secret_looking: 'not exposed' } },
   });
   expect(res.statusCode).toBe(201);
-  return (res.json() as { id: string }).id;
+  const id = (res.json() as { id: string }).id;
+  await app.inject({ method: 'POST', url: `/admin/connections/${id}/verify`, headers: admin.headers });
+  return id;
 }
 
 async function createClient(app: FastifyInstance, admin: AdminSession, label: string) {
@@ -61,7 +68,7 @@ async function createClient(app: FastifyInstance, admin: AdminSession, label: st
     method: 'POST',
     url: '/admin/clients',
     headers: admin.headers,
-    payload: { label, kind: 'cli' },
+    payload: { label },
   });
   expect(res.statusCode).toBe(201);
   return res.json() as { id: string; token: string };
@@ -82,19 +89,26 @@ function bearer(token: string) {
 }
 
 async function mcpListConnections(app: FastifyInstance, token: string): Promise<unknown> {
-  const res = await app.inject({
-    method: 'POST',
-    url: '/mcp',
-    headers: {
-      ...bearer(token),
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-    },
-    payload: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_connections', arguments: {} } },
+  const headers = { ...bearer(token), 'content-type': 'application/json', accept: 'application/json, text/event-stream' };
+  const initialized = await app.inject({
+    method: 'POST', url: '/mcp', headers,
+    payload: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: LATEST_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'client-list-test', version: '1' } } },
   });
-  const dataLine = res.body.split('\n').find((l) => l.startsWith('data:'));
-  const parsed = JSON.parse(dataLine!.replace('data: ', '')) as { result: { content: { text: string }[] } };
-  return JSON.parse(parsed.result.content[0]!.text);
+  if (initialized.statusCode !== 200) {
+    expect(initialized.statusCode).toBe(401);
+    return initialized.json();
+  }
+  const session = initialized.headers['mcp-session-id'];
+  expect(typeof session).toBe('string');
+  const sessionHeaders = { ...headers, 'mcp-session-id': session as string };
+  try {
+    const res = await app.inject({ method: 'POST', url: '/mcp', headers: sessionHeaders,
+      payload: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_connections', arguments: {} } } });
+    expect(res.statusCode).toBe(200);
+    const dataLine = res.body.split('\n').find((line) => line.startsWith('data:'));
+    const parsed = JSON.parse(dataLine ? dataLine.slice(5).trimStart() : res.body) as { result: { content: { text: string }[] } };
+    return JSON.parse(parsed.result.content[0]!.text);
+  } finally { await app.inject({ method: 'DELETE', url: '/mcp', headers: sessionHeaders }); }
 }
 
 describe('client-token listing', () => {
@@ -111,7 +125,7 @@ describe('client-token listing', () => {
   beforeAll(async () => {
     const db = tempDbPath();
     cleanupDb = db.cleanup;
-    app = (await buildServer({ dbPath: db.path })).app;
+    app = (await buildServer({ dbPath: db.path, dispatcher })).app;
     admin = await adminWithStepUp(app);
     await registerCaps(app, admin);
     connA = await createConnection(app, admin, 'A');
@@ -200,7 +214,7 @@ describe('client-token listing', () => {
     expect(await mcpListConnections(app, token)).toEqual(rest.json());
   });
 
-  it('MCP list_connections refuses a revoked client', async () => {
+  it('MCP initialization refuses a revoked client with HTTP 401', async () => {
     expect(await mcpListConnections(app, revokedToken)).toMatchObject({ error: { code: 'CLIENT_REVOKED' } });
   });
 
@@ -217,7 +231,7 @@ describe('state restore across a restart', () => {
     const db = tempDbPath();
     try {
       // ── first boot ─────────────────────────────────────────────────────
-      const first = (await buildServer({ dbPath: db.path })).app;
+      const first = (await buildServer({ dbPath: db.path, dispatcher })).app;
       const admin = await adminWithStepUp(first);
       await registerCaps(first, admin);
       const connId = await createConnection(first, admin, 'Persisted');
@@ -231,7 +245,7 @@ describe('state restore across a restart', () => {
       await first.close();
 
       // ── second boot, same DB ───────────────────────────────────────────
-      const second = (await buildServer({ dbPath: db.path })).app;
+      const second = (await buildServer({ dbPath: db.path, dispatcher })).app;
       try {
         // Dynamically registered capabilities live in memory only; YAML
         // connectors would be reloaded from CONNECTORS_DIR instead.

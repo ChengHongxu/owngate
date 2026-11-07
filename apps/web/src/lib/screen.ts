@@ -3,7 +3,7 @@
 
 export type ScreenStatus = 'pending' | 'success' | 'timeout' | 'idle'
 
-export type ScreenPhase = 'idle' | 'connecting' | 'live' | 'success' | 'timeout' | 'ended' | 'error'
+export type ScreenPhase = 'idle' | 'connecting' | 'live' | 'checking' | 'success' | 'timeout' | 'ended' | 'error'
 
 export const SCREEN_POLL_INTERVAL_MS = 2000
 
@@ -22,4 +22,25 @@ export function nextScreenPhase(phase: ScreenPhase, status: ScreenStatus): Scree
 /** 进入这些阶段就关闭画面 socket 并停止轮询 */
 export function isTerminalPhase(phase: ScreenPhase): boolean {
   return phase === 'success' || phase === 'timeout' || phase === 'ended' || phase === 'error'
+}
+
+/** The worker settles login state before closing its stream. Query once on
+ * close so a successful QR scan cannot be mistaken for a disconnected view. */
+export function screenPhaseAfterClose(status: ScreenStatus): ScreenPhase {
+  if (status === 'success') return 'success'
+  if (status === 'timeout') return 'timeout'
+  return 'ended'
+}
+
+export function screenPoint(
+  clientX: number,
+  clientY: number,
+  rect: { left: number; top: number; width: number; height: number },
+  frame: { width: number; height: number },
+): { x: number; y: number } | undefined {
+  if (rect.width <= 0 || rect.height <= 0 || frame.width <= 0 || frame.height <= 0) return undefined
+  return {
+    x: Math.min(frame.width - 1, Math.max(0, (clientX - rect.left) * frame.width / rect.width)),
+    y: Math.min(frame.height - 1, Math.max(0, (clientY - rect.top) * frame.height / rect.height)),
+  }
 }

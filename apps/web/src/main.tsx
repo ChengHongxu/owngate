@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { App } from './App'
 import { shouldRetryQuery } from './lib/http'
+import './lib/theme'
 import './styles.css'
 
 const queryClient = new QueryClient({

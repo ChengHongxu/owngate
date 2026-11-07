@@ -1,7 +1,7 @@
 // Worker error bodies (design §13.1): always {code, what_happened, next_step,
 // retryable}, with `code` from the §6.1 table only.
 //
-// The table is copied here rather than imported from @webridge/core: core's
+// The table is copied here rather than imported from @owngate/core: core's
 // ErrorCode union still carries pre-§6.1 codes (INVALID_INPUT, UNAUTHORIZED,
 // TIMEOUT …) and lacks UNAUTHENTICATED, so typing against it would let those
 // slip back in. test/errors.test.ts parses §6.1 out of 设计方案.md and checks

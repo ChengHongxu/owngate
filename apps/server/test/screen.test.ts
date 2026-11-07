@@ -203,20 +203,86 @@ describe('screen routes', () => {
     );
   });
 
-  it('POST input returns 501 rather than silently dropping input', async () => {
+  it('POST input requires an already ticketed active screen', async () => {
     const built = await buildApp();
     app = built.app;
 
     const res = await app.inject({
       method: 'POST',
       url: '/admin/screen/conn-1/input',
-      payload: { type: 'mouse', x: 10, y: 20 },
+      payload: { type: 'mouse', event: 'mousePressed', x: 10, y: 20 },
     });
 
-    expect(res.statusCode).toBe(501);
-    expect(res.json()).toEqual({
-      code: 'NOT_IMPLEMENTED',
-      next_step: '输入转发在 M1 后续提交中实现',
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('SCREEN_NOT_OPEN');
+  });
+
+  it('records each completed login signal once, including a new login after a previously settled one', async () => {
+    const onLoginCompleted = vi.fn(async (_connectionId: string, _since: string) => undefined);
+    const { deps } = buildDeps();
+    let since = '2026-11-07T00:00:00.000Z';
+    const built = await buildApp({ onLoginCompleted, browserClient: {
+      ...deps.browserClient, loginStatus: async () => ({ status: 'success', since }),
+    } });
+    app = built.app;
+    for (let index = 0; index < 3; index++) {
+      expect((await app.inject({ method: 'GET', url: '/admin/screen/conn-1/status' })).statusCode).toBe(200);
+    }
+    expect(onLoginCompleted).toHaveBeenCalledTimes(1);
+    expect(onLoginCompleted).toHaveBeenCalledWith('conn-1', since);
+    since = '2026-11-07T01:00:00.000Z';
+    await app.inject({ method: 'GET', url: '/admin/screen/conn-1/status' });
+    expect(onLoginCompleted).toHaveBeenCalledTimes(2);
+  });
+
+  it('POST input rejects invalid commands and requires step-up', async () => {
+    const built = await buildApp();
+    app = built.app;
+    const res = await app.inject({ method: 'POST', url: '/admin/screen/conn-1/input', payload: { type: 'mouse', event: 'Page.navigate', x: 10, y: 20 } });
+    expect(res.statusCode).toBe(400);
+    const locked = await buildApp({ hasStepUp: async () => false });
+    try {
+      const denied = await locked.app.inject({ method: 'POST', url: '/admin/screen/conn-1/input', payload: { type: 'text', text: 'fixture' } });
+      expect(denied.statusCode).toBe(403);
+    } finally { await locked.app.close(); }
+  });
+
+  it('forwards ticketed input and stops accepting it when the admin session is revoked', async () => {
+    class Upstream extends EventTarget {
+      readyState = 1;
+      sent: string[] = [];
+      send(text: string) { this.sent.push(text); }
+      close() {
+        if (this.readyState === 3) return;
+        this.readyState = 3;
+        this.dispatchEvent(Object.assign(new Event('close'), { code: 1000 }));
+      }
+    }
+    const upstream = new Upstream();
+    let authorised = true;
+    const { deps } = buildDeps();
+    const built = await buildApp({
+      getAdminUserId: async () => authorised ? 'user-1' : null,
+      browserClient: { ...deps.browserClient, openScreencast: () => upstream as unknown as WebSocket },
     });
+    app = built.app;
+    const opened = await openRequest(app);
+    const socket = await app.injectWS(opened.json().ws_path);
+    try {
+      await vi.waitFor(() => expect(built.audits.some((entry) => entry.action === 'screen.ws.open')).toBe(true));
+      socket.send(JSON.stringify({ type: 'input', event: { type: 'Page.navigate', url: 'http://127.0.0.1/' } }));
+      socket.send(JSON.stringify({ type: 'input', event: { type: 'text', text: 'private fixture input' } }));
+      await vi.waitFor(() => expect(upstream.sent).toHaveLength(1));
+      expect(JSON.parse(upstream.sent[0]!)).toEqual({ type: 'input', event: { type: 'text', text: 'private fixture input' } });
+      const fallback = await app.inject({ method: 'POST', url: '/admin/screen/conn-1/input', payload: { type: 'key', event: 'keyDown', key: 'Enter', code: 'Enter' } });
+      expect(fallback.statusCode).toBe(200);
+      expect(upstream.sent).toHaveLength(2);
+      expect(JSON.stringify(built.audits)).not.toContain('private fixture input');
+      authorised = false;
+      const closed = new Promise<number>((resolve) => socket.once('close', resolve));
+      socket.send(JSON.stringify({ type: 'input', event: { type: 'text', text: 'after revocation' } }));
+      expect(await closed).toBe(1008);
+      expect(upstream.sent).toHaveLength(2);
+    } finally { socket.close(); }
   });
 });
