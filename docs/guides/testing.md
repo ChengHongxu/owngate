@@ -11,7 +11,7 @@ pnpm typecheck:tests
 pnpm test
 ```
 
-构建先产生内部包依赖需要的产物。`typecheck:tests` 额外检查测试源码；常规类型检查不能替代它。工作区测试使用 Vitest，egress 也有 Node 测试。没有额外的 lint 规则要求。
+构建先产生内部包依赖需要的产物。`typecheck:tests` 额外检查测试源码；常规类型检查不能替代它。工作区测试使用 Vitest，egress 也有 Node 测试。没有额外的 lint 规则要求。CLI 测试会启动真实子进程并初始化原生加密或 PGlite；测试文件串行执行，默认每个用例 15 秒，避免小规格 runner 上的 CPU 争用触发无关超时。子进程和网络等待仍保留各自的截止时间。
 
 只修改一个区域时可以缩小测试范围，例如：
 
