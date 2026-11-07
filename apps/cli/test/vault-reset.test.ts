@@ -267,24 +267,40 @@ describe('spawned offline vault reset', () => {
     expect(await f.db.listCredentials('connection')).toEqual([])
   })
 
-  it('rejects system, home, project and database ancestor paths, symlinks and unmanaged entries', async () => {
+  // Each case starts a separate CLI process. Give each rejection its own test
+  // budget instead of timing nine process launches against one 5-second limit.
+  it.each(['root', 'home', 'project', 'database ancestor', 'system', 'unmanaged file',
+    ...(process.platform === 'win32' ? [] : ['symlink root', 'symlink parent', 'unmanaged symlink'])])('rejects %s paths without changing data', async kind => {
     const f = await fixture(), before = await snapshot(f.db)
-    for (const path of ['/', homedir(), root, f.directory, '/etc']) {
-      await expect(f.run(['--confirm', '--profiles-dir', path])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('dedicated managed directory') })
+    let path = f.profiles, reason = 'dedicated managed directory'
+    switch (kind) {
+      case 'root': path = '/'; break
+      case 'home': path = homedir(); break
+      case 'project': path = root; break
+      case 'database ancestor': path = f.directory; break
+      case 'system': path = '/etc'; break
+      case 'symlink root':
+        path = join(f.directory, 'linked-profiles')
+        symlinkSync(f.profiles, path, 'dir')
+        reason = 'symbolic links'
+        break
+      case 'symlink parent': {
+        const linkedParent = join(f.directory, 'linked-parent')
+        symlinkSync(f.directory, linkedParent, 'dir')
+        path = join(linkedParent, 'profiles')
+        reason = 'symbolic links'
+        break
+      }
+      case 'unmanaged symlink':
+        symlinkSync(f.outside, join(f.profiles, 'linked'), 'dir')
+        reason = 'unmanaged entries'
+        break
+      case 'unmanaged file':
+        writeFileSync(join(f.profiles, 'unexpected-file'), 'keep me')
+        reason = 'unmanaged entries'
+        break
     }
-    if (process.platform !== 'win32') {
-      const linkedRoot = join(f.directory, 'linked-profiles')
-      symlinkSync(f.profiles, linkedRoot, 'dir')
-      await expect(f.run(['--confirm', '--profiles-dir', linkedRoot])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('symbolic links') })
-      const linkedParent = join(f.directory, 'linked-parent')
-      symlinkSync(f.directory, linkedParent, 'dir')
-      await expect(f.run(['--confirm', '--profiles-dir', join(linkedParent, 'profiles')])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('symbolic links') })
-      symlinkSync(f.outside, join(f.profiles, 'linked'), 'dir')
-      await expect(f.run(['--confirm'])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('unmanaged entries') })
-      rmSync(join(f.profiles, 'linked'))
-    }
-    writeFileSync(join(f.profiles, 'unexpected-file'), 'keep me')
-    await expect(f.run(['--confirm'])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('unmanaged entries') })
+    await expect(f.run(['--confirm', '--profiles-dir', path])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining(reason) })
     expect(await snapshot(f.db)).toEqual(before)
     expect(readFileSync(join(f.outside, 'sentinel'), 'utf8')).toBe('external-data')
   })
